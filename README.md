@@ -27,7 +27,7 @@
 
 ```text
 请读取这个仓库的 README，帮我安装并准备视频制作技能包：
-https://github.com/Jettlin927/video-production
+https://github.com/xingtuozhineng/video-production
 
 请整套安装 video-production、talking-head-cut、hook-video、ppt-screencast，保持四个目录同级。
 先确认我正在使用的 AI 软件，以及原片、成片要保存到哪个文件夹。
@@ -81,7 +81,7 @@ https://github.com/Jettlin927/video-production
 首次获取源码可用 HTTPS，不要求普通用户先配置 SSH：
 
 ```shell
-git clone --branch main --single-branch https://github.com/Jettlin927/video-production.git
+git clone --branch main --single-branch https://github.com/xingtuozhineng/video-production.git
 ```
 
 也可以下载 GitHub 仓库 ZIP，由 AI 解压后安装完整的四个目录。源码下载目录不自动等于宿主的技能目录。
@@ -89,7 +89,7 @@ git clone --branch main --single-branch https://github.com/Jettlin927/video-prod
 例如，通过 Skills CLI 安装到 Codex：
 
 ```shell
-npx skills add Jettlin927/video-production --skill video-production talking-head-cut hook-video ppt-screencast -g -a codex
+npx skills add xingtuozhineng/video-production --skill video-production talking-head-cut hook-video ppt-screencast -g -a codex
 ```
 
 Claude Code 的目标标识为 `claude-code`。其他宿主先查 [Skills CLI 支持列表和说明](https://github.com/vercel-labs/skills)，不要把 `-a codex` 当作所有 AI 软件的通用参数，也不要猜测 DeepSeek Harness 的 CLI 标识。
