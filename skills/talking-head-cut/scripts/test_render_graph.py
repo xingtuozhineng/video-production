@@ -1,6 +1,10 @@
 """Static guards; real media behavior is tested in test_render_media.py."""
+import json
+from pathlib import Path
+import tempfile
 import unittest
-from render_timeline import graph
+from unittest.mock import patch
+from render_timeline import graph, audio_graph, main as render
 
 
 def fixture():
@@ -10,6 +14,26 @@ def fixture():
 
 
 class RenderGraphTests(unittest.TestCase):
+    def test_audio_preview_uses_identical_av_sample_trims_and_final_tail(self):
+        for fps in ({'num':30,'den':1},{'num':60000,'den':1001}):
+            plan=fixture(); plan['fps']=fps
+            av=graph(plan,1080,1920,input_start_s=0).split(';')
+            audio=[r for r in av if r.startswith('[0:a]') or r.startswith('[as') or ':v=0:a=1,' in r]
+            self.assertEqual(audio_graph(plan,0),';'.join(audio))
+            self.assertNotIn('[0:v]',audio_graph(plan,0))
+
+    def test_portrait_plan_cannot_be_rendered_with_a_landscape_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = dict(fixture(), width=1080, height=1920, output_orientation='portrait')
+            (root / 'plan.json').write_text(json.dumps(plan), encoding='utf-8')
+            with patch('render_timeline.validate', return_value={'status': 'pass'}), \
+                 self.assertRaisesRegex(ValueError, 'must be portrait'):
+                render(['--source', str(root / 'raw.mp4'), '--plan', str(root / 'plan.json'),
+                        '--out', str(root / 'out.mp4'), '--ffmpeg', 'ffmpeg',
+                        '--width', '1920', '--height', '1080'])
+            self.assertFalse((root / 'out.mp4').exists())
+
     def test_audio_keeps_sample_lengths_and_pads_only_final_tail(self):
         text = graph(fixture(), 1080, 1920)
         self.assertIn('atrim=start_sample=4800:end_sample=53520', text)

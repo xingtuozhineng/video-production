@@ -13,6 +13,7 @@ import math
 
 from managed_job import lock, read, write
 from export_jianying import normalize
+import pre_render_review
 
 HERE = Path(__file__).resolve().parent
 TALKING = HERE.parents[1] / 'talking-head-cut/scripts'
@@ -47,7 +48,11 @@ def main(argv=None):
     source = Path(plan['source'].get('path') or plan['source'].get('source_path')).resolve()
     if not all(type(plan.get(k)) is int and plan[k] > 0 for k in ['width', 'height']):
         raise ValueError('Plan requires positive width/height; use select before compile')
+    if plan['width'] >= plan['height']:
+        raise ValueError('Talking-head delivery must be portrait; rebuild the plan and captions with select')
     normalize(plan, captions)  # Validate export compatibility BEFORE expensive rendering.
+    project = pre_render_review.project_for(a.plan, a.captions_dir/'captions.ass')
+    pre_review = pre_render_review.require(pre_render_review.inputs(project, a.plan, a.captions_dir)) if project else None
     if importlib.util.find_spec('pyJianYingDraft') is None:
         raise RuntimeError('Draft writer missing from workspace Python; run prepare')
     tools = read(a.workspace_root / 'video-production-deps/tools.json')
@@ -60,7 +65,8 @@ def main(argv=None):
               'ffmpeg': stamp(tools['ffmpeg']), 'ffprobe': stamp(tools['ffprobe']),
               'encoder': a.encoder, 'preset': a.preset, 'crf': a.crf,
               'code': {f.name: file_hash(f) for f in [Path(__file__), HERE / 'hardware.py',
-                       HERE / 'export_jianying.py', TALKING / 'render_timeline.py', TALKING / 'qc_delivery.py']}}
+                       HERE / 'export_jianying.py', TALKING / 'render_timeline.py', TALKING / 'qc_delivery.py',
+                       TALKING / 'sync_timeline.py', TALKING / 'speech_checks.py', HERE/'pre_render_review.py']}}
     signature = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:20]
     out = a.out_dir.resolve() / signature
     out.mkdir(parents=True, exist_ok=True)
@@ -70,9 +76,14 @@ def main(argv=None):
         snapshot = out / 'project'; snapshot.mkdir(exist_ok=True)
         write(snapshot / 'edit-plan.json', plan)
         write(snapshot / 'inputs.json', inputs)
+        if pre_review:
+            write(snapshot/'pre-render-review.json', {**pre_review, 'decision_record': read(pre_review['decisions'])})
         (snapshot / 'captions').mkdir(exist_ok=True)
         for name in ['captions.json', 'captions.ass', 'captions.srt']:
             shutil.copy2(a.captions_dir / name, snapshot / 'captions' / name)
+        resolved = a.captions_dir / 'authoring.resolved.json'
+        if resolved.is_file():
+            shutil.copy2(resolved, snapshot / 'captions' / resolved.name)
         shutil.copytree(a.captions_dir / 'fonts', snapshot / 'captions/fonts', dirs_exist_ok=True)
         plan_path = snapshot / 'edit-plan.json'
         def stage(name, command, outputs, force=False):
@@ -119,12 +130,26 @@ def main(argv=None):
         sample['audio_samples'] = round(sample['audio_duration_s'] * plan.get('sample_rate', 48000))
         preflight = out / 'preflight'; preflight.mkdir(exist_ok=True)
         write(preflight / 'plan.json', sample)
-        stage('preflight', [*render, '--plan', preflight / 'plan.json', '--out', preflight / 'sample.mp4'],
+        stage('preflight', [*render, '--plan', preflight / 'plan.json', '--out', preflight / 'sample.mp4',
+                            '--review-sample-parent', plan_path],
               [preflight / 'sample.mp4'])
         rendered = stage('render', [*render, '--plan', plan_path, '--out', out / 'final.mp4'], [out / 'final.mp4'])
         stage('qc', [sys.executable, TALKING / 'qc_delivery.py', '--media', out / 'final.mp4',
                      '--plan', plan_path, '--out', out / 'qc.json', '--ffmpeg', tools['ffmpeg'],
                      '--ffprobe', tools['ffprobe']], [out / 'qc.json'], force=rendered)
+        stage('sync', [sys.executable, TALKING / 'sync_timeline.py', '--media', out / 'final.mp4',
+                       '--plan', plan_path, '--out-dir', out / 'sync', '--ffmpeg', tools['ffmpeg']],
+              [out / 'sync/sync.json'], force=rendered)
+        review = out / 'review'; review.mkdir(exist_ok=True)
+        for index, fraction in enumerate((.05, .33, .66, .95), 1):
+            second = min(plan['duration_s'] - 1 / fps, plan['duration_s'] * fraction)
+            stage(f'review-frame-{index}', [tools['ffmpeg'], '-v', 'error', '-nostdin', '-ss', second,
+                  '-i', out / 'final.mp4', '-frames:v', 1, '-vf',
+                  'scale=360:640:force_original_aspect_ratio=decrease,pad=360:640:(ow-iw)/2:(oh-ih)/2',
+                  '-y', review / f'frame{index}.jpg'], [review / f'frame{index}.jpg'], force=rendered)
+        stage('review-sheet', [tools['ffmpeg'], '-v', 'error', '-nostdin', '-framerate', 1,
+                              '-i', review / 'frame%d.jpg', '-vf', 'tile=2x2', '-frames:v', 1,
+                              '-y', review / 'contact-sheet.jpg'], [review / 'contact-sheet.jpg'], force=rendered)
         draft = out / '剪映工程'
         stage('jianying', [sys.executable, HERE / 'export_jianying.py', '--plan', plan_path,
                           '--captions', snapshot / 'captions/captions.json', '--out', draft],
@@ -133,17 +158,29 @@ def main(argv=None):
         state.update(state='completed', stage='done', human_review='not_checked',
                      overall='review_required', outputs={'mp4': str(out / 'final.mp4'),
                      'srt': str(out / 'final.srt'), 'jianying': str(draft), 'qc': str(out / 'qc.json')})
+        state['outputs'].update(sync=str(out / 'sync/sync.json'), review_sheet=str(review / 'contact-sheet.jpg'))
+        if pre_review:
+            state['outputs']['pre_render_review'] = str(snapshot/'pre-render-review.json')
         write(state_file, state)
         # A compact, file-based handoff survives a cold model cache or a new context.
         write(a.out_dir / 'handoff.json', {'revision': plan['revision'], 'state': state['state'],
                                          'overall': state['overall'], 'outputs': state['outputs'],
-                                         'project': str(snapshot), 'remaining': ['听审', '剪映打开和编辑保存']})
+                                         'project': str(snapshot), 'summary': {
+                                             'width': plan['width'], 'height': plan['height'], 'fps': plan['fps'],
+                                             'duration_s': plan['duration_s'], 'segments': len(plan['segments']),
+                                             'caption_pages': len(captions['captions']),
+                                             'caption_warnings': captions.get('warnings', []),
+                                             'technical_qc': read(out / 'qc.json')['status'],
+                                             'audio_sync': read(out / 'sync/sync.json')['status'],
+                                             'encoder': read(out / 'render-result.json')['encoder']},
+                                         'remaining': ['成片抽帧视看', '听审', '剪映打开和编辑保存']})
         production_path = a.out_dir.parent / 'production.json'
         if production_path.is_file():
             production = read(production_path)
             production.update(export_format='both', timeline_revision=plan['revision'],
                               outputs={**state['outputs'], 'revision': plan['revision']},
                               qc_summary={'overall': 'review_required', 'technical': 'pass',
+                                          'audio_sync': read(out / 'sync/sync.json')['status'],
                                           'listening': 'not_checked', 'jianying_app': 'not_checked'})
             write(production_path, production)
         print(json.dumps(read(a.out_dir / 'handoff.json'), ensure_ascii=False))

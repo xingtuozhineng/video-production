@@ -27,6 +27,14 @@ def captions():
 
 
 class TimelineTests(unittest.TestCase):
+    def test_portrait_plan_cannot_export_a_landscape_canvas(self):
+        p = plan(); p.update(width=640, height=360, output_orientation='portrait')
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'draft'
+            with self.assertRaisesRegex(ValueError, 'canvas must be portrait'):
+                export_project(p, out)
+            self.assertFalse(out.exists())
+
     def test_custom_draft_location_takes_precedence(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);data=root/'User Data';config=data/'Config';config.mkdir(parents=True)
@@ -67,11 +75,24 @@ class TimelineTests(unittest.TestCase):
             p=plan();p['segments'][0][key]=value
             with self.assertRaises(ValueError): normalize(p)
 
-    def test_nonfinite_and_fractional_fps_rejected(self):
+    def test_nonfinite_time_rejected(self):
         p=plan();p['segments'][0]['source_in_s']=float('nan')
         with self.assertRaises(ValueError): normalize(p)
-        p=plan();p['fps']={'num':30000,'den':1001}
-        with self.assertRaisesRegex(ValueError,'integer FPS'): normalize(p)
+
+    def test_fractional_fps_preserves_exact_times_and_reports_draft_grid(self):
+        p=plan();p.update(fps={'num':60000,'den':1001},duration_frames=240)
+        c=captions();c['fps']=p['fps']
+        c['captions'][0].update(start_frame=0,end_frame=120)
+        c['captions'][1].update(start_frame=120,end_frame=240)
+        original=copy.deepcopy(p)
+        result=normalize(p,c)
+        self.assertEqual(p,original)
+        self.assertEqual(result['fps'],60)
+        self.assertEqual(result['timeline_fps'],p['fps'])
+        self.assertEqual(result['duration_us'],4004000)
+        self.assertEqual(result['tracks']['字幕'][1]['start_us'],2002000)
+        self.assertEqual(result['tracks']['原片与同期声'][1]['start_us'],2000000)
+        self.assertTrue(any('60000/1001' in w for w in result['warnings']))
 
     def test_layers_under_text_and_overlap_rejected(self):
         layer=dict(kind='video',track='画面',path='image.png',start_s=0,end_s=2)

@@ -8,6 +8,18 @@ from inspect_inputs import inspect, document_rows
 
 
 class InspectInputsTests(unittest.TestCase):
+    def test_selection_review_exposes_omitted_neighbors_and_source_seconds(self):
+        words = self.words()
+        selection = {'source_revision': 'r', 'ranges': [{'first': 2, 'last': 4, 'reason': '保留句子'}]}
+        row = inspect('selection', selection, words=words)['rows'][0]
+        self.assertEqual(row['text'], '123')
+        self.assertEqual(row['before'], '0')
+        self.assertEqual(row['after'], '45')
+        self.assertEqual(row['start_s'], .2)
+        self.assertEqual(row['first_word'], 2)
+        with self.assertRaisesRegex(ValueError, 'revision'):
+            inspect('selection', selection, words={**words, 'revision': 'stale'})
+
     def words(self):
         return {'revision': 'r', 'words': [
             {'id': str(i), 'instance_id': 'a' if i < 3 else 'b', 'utterance_id': 'u',

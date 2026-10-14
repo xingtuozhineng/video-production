@@ -43,6 +43,7 @@ def graph(plan, width, height, captions=False, input_start_s=0):
     segments = plan['segments']
     count = len(segments)
     fps = plan['fps']['num'] / plan['fps']['den']
+    fps_expr = f"{plan['fps']['num']}/{plan['fps']['den']}"
     sr = plan.get('sample_rate', 48000)
     rows = [f'[0:v]split={count}' + ''.join(f'[vs{i}]' for i in range(count)),
             f'[0:a]aresample={sr},asplit={count}' + ''.join(f'[as{i}]' for i in range(count))]
@@ -51,8 +52,8 @@ def graph(plan, width, height, captions=False, input_start_s=0):
         frames = round(segment['final_out_s'] * fps) - round(segment['final_in_s'] * fps)
         if frames <= 0:
             raise ValueError('Video segment below one frame')
-        chain = (f'trim=start={a:.9f}:end={b:.9f},setpts=PTS-STARTPTS,fps={fps:g},'
-                 f'tpad=stop_mode=clone:stop=2,trim=end_frame={frames},setpts=N/({fps:g}*TB)')
+        chain = (f'trim=start={a:.9f}:end={b:.9f},setpts=PTS-STARTPTS,fps={fps_expr},'
+                 f'tpad=stop_mode=clone:stop=2,trim=end_frame={frames},setpts=N/({fps_expr}*TB)')
         # Source sample bounds are computed once; no per-segment silence or duration change.
         audio = (f"atrim=start_sample={round(segment['source_in_s'] * sr) - input_start_s * sr}:"
                  f"end_sample={round(segment['source_out_s'] * sr) - input_start_s * sr},asetpts=N/SR/TB")
@@ -60,11 +61,41 @@ def graph(plan, width, height, captions=False, input_start_s=0):
                     f'pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,setsar=1[v{i}]')
         rows.append(f'[as{i}]{audio}[a{i}]')
     rows.append(''.join(f'[v{i}]' for i in range(count)) +
-                f"concat=n={count}:v=1:a=0,tpad=stop_mode=clone:stop=1,trim=end_frame={plan['duration_frames']},setpts=N/({fps:g}*TB)[vcat]")
+                f"concat=n={count}:v=1:a=0,tpad=stop_mode=clone:stop=1,trim=end_frame={plan['duration_frames']},setpts=N/({fps_expr}*TB)[vcat]")
     rows.append(''.join(f'[a{i}]' for i in range(count)) +
                 f"concat=n={count}:v=0:a=1,apad,atrim=end_sample={round(plan['duration_frames'] / fps * sr)}[aout]")
     rows.append('[vcat]ass=captions.ass:fontsdir=fonts[vout]' if captions else '[vcat]null[vout]')
     return ';'.join(rows)
+
+
+def audio_graph(plan, input_start_s=0):
+    """The same sample trims, concatenation and final tail as the AV renderer."""
+    sr=plan.get('sample_rate',48000); count=len(plan['segments'])
+    rows=[f'[0:a]aresample={sr},asplit={count}'+''.join(f'[as{i}]' for i in range(count))]
+    for i,segment in enumerate(plan['segments']):
+        rows.append(f"[as{i}]atrim=start_sample={round(segment['source_in_s']*sr)-input_start_s*sr}:"
+                    f"end_sample={round(segment['source_out_s']*sr)-input_start_s*sr},asetpts=N/SR/TB[a{i}]")
+    fps=plan['fps']['num']/plan['fps']['den']
+    samples=round(plan['duration_frames']/fps*sr)
+    rows.append(''.join(f'[a{i}]' for i in range(count))+f'concat=n={count}:v=0:a=1,apad,atrim=end_sample={samples}[aout]')
+    return ';'.join(rows)
+
+
+def render_audio(source, plan, out, ffmpeg):
+    if out.suffix.lower()!='.wav' or source==out:
+        raise ValueError('Audio-only preview needs a distinct WAV output')
+    out.parent.mkdir(parents=True,exist_ok=True)
+    start,duration=input_window(plan)
+    with lock(out.parent/('.'+out.name+'.lock')), tempfile.TemporaryDirectory(prefix='.audio-preview-',dir=out.parent) as directory:
+        temp=Path(directory); (temp/'graph.txt').write_text(audio_graph(plan,start),encoding='utf-8')
+        command=[ffmpeg,'-v','error','-nostdin','-ss',str(start),'-t',str(duration),'-i',source,
+                 '-/filter_complex','graph.txt','-map','[aout]','-vn','-c:a','pcm_s16le','-y',temp/'preview.wav']
+        subprocess.run(list(map(str,command)),cwd=temp,capture_output=True,check=True)
+        os.replace(temp/'preview.wav',out)
+    report={'status':'pass','revision':plan['revision'],'output':str(out),'kind':'timeline_pcm_preview',
+            'sample_rate':plan.get('sample_rate',48000),'listening':'not_checked','video_rendered':False}
+    write_state(out.with_suffix('.json'),report)
+    return report
 
 
 def main(argv=None):
@@ -74,7 +105,9 @@ def main(argv=None):
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--ffmpeg', type=Path, required=True)
     parser.add_argument('--captions-ass', type=Path)
-    parser.add_argument('--width', type=int, default=1920); parser.add_argument('--height', type=int, default=1080)
+    parser.add_argument('--audio-only', action='store_true', help='PCM WAV from identical sample cuts; no video encoder.')
+    parser.add_argument('--review-sample-parent', type=Path, help='Internal bounded calibration sample of a reviewed parent plan.')
+    parser.add_argument('--width', type=int); parser.add_argument('--height', type=int)
     parser.add_argument('--encoder', choices=('auto', 'libx264', *ENCODERS), default='auto')
     parser.add_argument('--hardware-report', type=Path)
     parser.add_argument('--preset', default='medium'); parser.add_argument('--crf', type=int, default=18)
@@ -89,6 +122,19 @@ def main(argv=None):
     report = validate(plan)
     if report['status'] != 'pass':
         raise SystemExit('invalid timeline: ' + '; '.join(report['errors']))
+    if args.audio_only:
+        print(json.dumps(render_audio(args.source,plan,args.out,args.ffmpeg),ensure_ascii=False))
+        return 0
+    from pre_render_review import require_render
+    require_render(args.plan, args.captions_ass, args.review_sample_parent, args.source, args.width, args.height)
+    if (args.width is None) != (args.height is None):
+        raise ValueError('Provide both width and height, or neither')
+    if args.width is None:
+        args.width, args.height = plan.get('width'), plan.get('height')
+    if not all(type(x) is int and x > 0 and x % 2 == 0 for x in (args.width, args.height)):
+        raise ValueError('Positive even plan dimensions required; rerun select or provide width and height')
+    if plan.get('output_orientation') == 'portrait' and args.width >= args.height:
+        raise ValueError('Talking-head output must be portrait (height > width)')
     args.out.parent.mkdir(parents=True, exist_ok=True)
     if args.source == args.out:
         raise ValueError('Output must not overwrite source media')

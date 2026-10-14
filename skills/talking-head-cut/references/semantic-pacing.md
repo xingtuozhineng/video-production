@@ -44,7 +44,7 @@ python scripts/map_words.py --transcript run/transcript.source.json --plan run/e
 
 脚本要求所有候选都有且只有一条分类/理由，拒绝漏标、过期 revision、未知候选、重叠话语和小于一帧的画面片段。检查保留词 ID、顺序和实际词长一致，没有跨切口的词；报告分类型统计、原/新平均值及中位数、逐处目标与实际值。所有候选和仅正间隔分别统计，口径保持一致。
 
-在 `words.final.json` 基础上一次性规划字幕短语、完整重点、上下两行的存续及动效。句内切音不能成为字幕清屏的依据：字幕语义组和媒体切片 ID 独立，按词 ID 更新字幕引用。准备好 `rolling-editorial.json` / `captions.rolling.json`，再进入媒体执行。
+在 `words.final.json` 基础上默认生成完整基础字幕，只为少量关键句添加重点。句内切音不能成为字幕清屏的依据：字幕分页和媒体切片 ID 独立，按词 ID 更新字幕引用。只有用户要求滚动动效时才准备 `rolling-editorial.json` / `captions.rolling.json`。
 
 完成条件：计划通过候选覆盖和词覆盖检查；气口统计、字幕分组、重点和所有时间戳引用同一 revision。
 

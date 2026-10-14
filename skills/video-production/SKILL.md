@@ -63,7 +63,7 @@ python "<skill-root>/scripts/video_production.py" prepare --workspace-root "<wor
 
 PPT 运镜讲解读 [ppt-screencast/SKILL.md](../ppt-screencast/SKILL.md)，同一执行约定。以“信息地图 → 讲解时间轴 → 目标绑定运镜与鼠标圈画 → 验收交付”为主；视觉形式优先于“营销”或“有录音”这些标签，不压成默认 30 秒钩子，也不把配音当真人原片。只有要求匀速长页滚动或逐屏大字时仍按实际形态选择原流程。
 
-路由到真人口播后，执行子流程的“转写 → 角色与多次复述核对 → 内容选择 → 气口语义标注与字幕规划 → 应用剪辑 → 画面策划与包装 → 渲染/QC”。选段前按子流程的 [角色与 take 规则](../talking-head-cut/references/recording-roles.md) 区分纯口播、领读漏识别、领读被识别及多遍复述，完成角色表并传给 `select --review`。气口候选在确认保留内容后生成；切媒体前完成逐处时长与理由标注。主流程不能跳过计划直接按静音阈值删除。字幕/字体的局部修改复用已有转写与剪辑计划。
+路由到真人口播后，执行子流程的“转写 → 角色与发言用途核对 → 主角重拍取舍与保留区间复核 → 气口与时间轴 → 基础字幕＋少量重点 → 渲染前集中审核 → 渲染/QC”。选段前按 [角色与发言用途规则](../talking-head-cut/references/recording-roles.md) 区分领读、正式正文、试词与拍摄交流，完成同一角色表的`content_review`及必要例外后传给`select --review`。确认保留内容后再处理气口；字幕/字体的局部修改复用已有转写与剪辑计划。
 
 写入任务目录根部的 `production.json`：`route`（transcription/talking-head/hook-video/ppt-screencast/storyboard/asset/existing-edit；Skill 验证使用 validation）、`route_reason`、`inputs`、`style`、`project_dir`、`output_dir`、`constraints`、`environment.tools_json`。路径必须落在规范分层中；这是路由记录，不是给用户多加表单。仅转字幕时交付文字稿、词级 JSON、SRT 和说话人摘要；视频制作返回工程、文件和真实质检。
 
@@ -74,7 +74,7 @@ PPT 运镜讲解读 [ppt-screencast/SKILL.md](../ppt-screencast/SKILL.md)，同�
 3. **路由**：确认附件、目标和输出范围，只选择一个 `route`，完善 `production.json`；不为了寻找“更好的工具”新增路线。
 4. **建立唯一时间轴**：
    - 仅转写：探测媒体 → 转写 → 词级 JSON/可读稿/SRT → 文字质检。
-   - 真人口播：默认读取 [固定口播流水线](references/stable-talking-head.md)，用 `index → select → compile → caption-draft → caption-build → deliver`。Agent编辑选段、气口和字幕数据；程序完成衔接、后台渲染、QC和导出。复杂字幕动效按用户目标另走对应参考。
+   - 真人口播：默认读取 [固定口播流水线](references/stable-talking-head.md)，用`talking-batch`的`prepare → select → compile → review → deliver`阶段交接。Agent通读完整审核包，集中编辑角色/选段、气口和字幕数据；review在整片编码前集中检查，程序完成衔接、后台渲染、QC、导出及用户要求的听审。原子命令用于局部修改或异常查询，也通过同一前置审核门。
    - 钩子/分镜：脚本或分镜 → 时间轴计划 → 准备已有素材 → 渲染 → 文件与画面 QC。
    - PPT 运镜：信息地图 → 讲解时间轴 → screencast-plan → screencast-check → 运镜／鼠标渲染 → 连续动作与内容 QC。
 5. **交付**：所有输出消费同一 revision；PPT运镜默认只交MP4，其他完整视频按双产物合同生成剪映工程；分别报告文件、技术、内容和实际视听状态。
@@ -84,7 +84,7 @@ PPT 运镜讲解读 [ppt-screencast/SKILL.md](../ppt-screencast/SKILL.md)，同�
 ## Agent 执行约束
 
 - 环境门只跑一次；主 Skill 将同一份结果传给子 Skill。子 Skill 不重复探测 PATH、缓存、浏览器、字体或模型，也不重新寻找 FFmpeg。
-- 先运行统一 CLI 的 `contract --command <当前子命令>` 获取当前接口，再查看对应 `--help` 和 JSON/TSV。只有错误诊断不足以解释阻塞时，才按符号或行范围读取源码。
+- 参数不清楚时用统一CLI的`contract --command <当前子命令>`或`--help`查询；本次已确认的命令与固定流水线示例直接复用。优先查看当前JSON/TSV摘要，只有错误诊断不足以解释阻塞时才按符号或行范围读取源码。
 - 大型转写只生成一次紧凑索引（如 utterance/word TSV），后续内容选择、气口和字幕都复用索引；不要在每个阶段重新读取完整转写或重新写一套 dump 脚本。
 - Word脚本、词范围、气口和最终接缝用统一 CLI `inspect` 查询；有脚本文档、多原片或需要定位上下文时读 [输入查询](references/input-inspection.md)。返回的分页／截断标记必须处理，完整语义不能从截断摘要推断。
 - 小范围画面验证使用 `scripts/sample_frames.py --ranges START:END,...`；它按每个时间窗口 seek 后再 concat。不要用全片 `select` 只取少数帧，否则仍会顺序解码整个 HEVC 文件。
@@ -102,6 +102,8 @@ PPT运镜讲解是MP4-only例外：`export_format: "mp4"`，由 `screencast-buil
 4. 回复同时给出 MP4 和草稿目录的可访问位置、草稿安装方法及已知样式差异。剪映内后续修改需重新导出 MP4，旧成片不会自动更新。
 
 ## 公共能力
+
+- 用户要求音频听审或复核领读/试词/切口声音时，使用 [Qwen-Omni音频复核](references/audio-review.md)：原片在选段前检查，最终字幕构建后预听同时间轴PCM，实际成片在渲染后复核，同一视频共用0.2元预算。程序管理调用、用量与覆盖率，模型意见不自动替代角色确认或人工听审。
 
 - 环境状态统一由上面的 [scripts/check_env.py](scripts/check_env.py) 提供。需要云 API 时才加 `--network`；需要完整字体哈希时才加 `--deep`。项目模式下使用 `video-production-deps/tools.json` 的路径；FFmpeg 脚本调用必须显式传入项目内路径。
 - 视频/录音需要字幕或文字稿时读取 [asr.md](references/asr.md)。`.env` 已配置时，在用户要求的转写/剪辑范围内用百炼脚本执行；支持 WAV/MP3 上传、词级时码和说话人分离。含画外提示时先确定主角角色与保留词，再剪媒体和重建字幕。ffmpeg 不在 PATH 时按检查脚本解析出的路径传 `--ffmpeg`。

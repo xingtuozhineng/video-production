@@ -10,8 +10,8 @@ import shutil
 import subprocess
 
 from map_words import remap
-from semantic_pacing import prepare
-from caption_pages import compile_pages, key, word_text, write_srt
+from semantic_pacing import prepare, TARGETS
+from caption_pages import compile_pages, key, word_text, write_srt, frame
 from recording_review import draft_review, utterance_groups, validate_review, protect_audio
 
 
@@ -60,7 +60,7 @@ def index(transcript, out):
             'utterances': str(out / 'utterances.tsv'), 'recording_review': str(review_path)}
 
 
-def select(transcript, selection, source, ffprobe, out, fps=30, width=None, height=None, review=None):
+def select(transcript, selection, source, ffprobe, out, fps=None, width=None, height=None, review=None):
     if selection.get('source_revision') != transcript['revision']:
         raise ValueError('Stale selection source_revision')
     validate_review(transcript, selection, review)
@@ -73,6 +73,7 @@ def select(transcript, selection, source, ffprobe, out, fps=30, width=None, heig
     if not any(s['codec_type'] == 'audio' for s in meta['streams']):
         raise ValueError('Talking-head source needs an audio stream')
     source_rate = Fraction(video['avg_frame_rate'])
+    fps = source_rate if fps is None else Fraction(fps)
     duration = float(meta['format']['duration'])
     if any(r['end_s'] > duration for r in review.get('excluded_audio', [])):
         raise ValueError('Excluded audio exceeds source duration')
@@ -83,10 +84,13 @@ def select(transcript, selection, source, ffprobe, out, fps=30, width=None, heig
     if (width is None) != (height is None):
         raise ValueError('Provide both width and height, or neither')
     if width is None:
-        scale = min(1, 1080 / min(vw, vh))
-        width, height = round(vw * scale / 2) * 2, round(vh * scale / 2) * 2
+        width, height = min(vw, vh), max(vw, vh)
+        if width == height:
+            height = math.ceil(width * 16 / 9 / 2) * 2
     if fps <= 0 or width <= 0 or height <= 0 or width % 2 or height % 2:
         raise ValueError('Positive FPS and positive even dimensions required')
+    if width >= height:
+        raise ValueError('Talking-head output must be portrait (height > width)')
     errors, used, segments, cursor = [], set(), [], 0
     for i, item in enumerate(selection.get('ranges', []), 1):
         a, b = item.get('first'), item.get('last')
@@ -122,11 +126,15 @@ def select(transcript, selection, source, ffprobe, out, fps=30, width=None, heig
     stat = source.stat()
     source_info = {'path': str(source.resolve()), 'duration_s': duration,
                    'fps': {'num': source_rate.numerator, 'den': source_rate.denominator},
+                   'width': video['width'], 'height': video['height'], 'rotation': rotation,
+                   'display_width': vw, 'display_height': vh,
                    'size': stat.st_size, 'modified_ns': stat.st_mtime_ns}
-    revision = 'selection-' + digest([selection, source_info, transcript, fps, width, height, review])
+    output_rate = {'num': fps.numerator, 'den': fps.denominator}
+    revision = 'selection-' + digest([selection, source_info, transcript, output_rate, width, height, review])
     frames = math.ceil(cursor / 48000 * fps - 1e-7)
     plan = {'revision': revision, 'source': source_info, 'width': width, 'height': height,
-            'fps': {'num': fps, 'den': 1}, 'duration_frames': frames, 'duration_s': frames / fps,
+            'output_orientation': 'portrait',
+            'fps': output_rate, 'duration_frames': frames, 'duration_s': float(frames / fps),
             'sample_rate': 48000, 'audio_samples': cursor, 'audio_duration_s': cursor / 48000,
             'timing_mode': 'sample_audio_cumulative_video', 'segments': segments,
             'recording_review': copy.deepcopy(review)}
@@ -142,28 +150,163 @@ def select(transcript, selection, source, ffprobe, out, fps=30, width=None, heig
     return {'revision': revision, 'segments': len(segments), 'words': len(mapped['words'])}
 
 
+def author_pauses(decisions, draft):
+    if draft.get('revision') != decisions['revision']:
+        raise ValueError('Stale pause authorship revision')
+    result = copy.deepcopy(decisions)
+    used = set()
+    for group in draft.get('groups', []):
+        if group.get('category') not in TARGETS or not group.get('reason'):
+            raise ValueError('Each pause group needs a category and reason')
+        for i in group['indexes']:
+            if type(i) is not int or not 1 <= i <= len(result['boundaries']) or i in used:
+                raise ValueError('Pause indexes must be valid, unique and one-based')
+            used.add(i)
+            row = result['boundaries'][i-1]
+            for field in ('target_ms', 'preserve'):
+                row.pop(field, None)
+            row.update({k: group[k] for k in ('category', 'reason', 'target_ms', 'preserve') if k in group})
+            if 'target_ms' in row and (type(row['target_ms']) not in (int, float)
+                                      or not math.isfinite(row['target_ms']) or not 0 < row['target_ms'] <= 1000):
+                raise ValueError('Pause target_ms must be finite and within (0,1000]')
+            if 'preserve' in row and type(row['preserve']) is not bool:
+                raise ValueError('Pause preserve must be boolean')
+    if used != set(range(1, len(result['boundaries']) + 1)):
+        raise ValueError('Pause groups must cover every candidate exactly once')
+    return result
+
+
 def caption_draft(words, plan, out, max_chars=16):
     if words['revision'] != plan['revision']:
         raise ValueError('Stale mapped words')
-    pages, first, length = [], 1, 0
-    for i, w in enumerate(words['words'], 1):
-        text = word_text(w)
-        if length and length + len(text) > max_chars:
-            pages.append({'lines': [[first, i - 1]], 'emphasis': []})
-            first, length = i, 0
-        length += len(text)
-        if text.endswith(('。', '！', '？', '；', '!', '?')):
-            pages.append({'lines': [[first, i]], 'emphasis': []})
+    ws = words['words']
+    fps = plan['fps']['num'] / plan['fps']['den']
+    pages, lines, first, length = [], [], 1, 0
+    for i, w in enumerate(ws, 1):
+        length += len(word_text(w))
+        next_word = ws[i] if i < len(ws) else None
+        # Keep quantized overlapping/zero-duration word pairs on the same page.
+        safe_break = (next_word is None or frame(w['final_end_s'], fps) <= frame(next_word['final_start_s'], fps))
+        punctuation = (word_text(w) + w.get('punctuation', '')).endswith(('。', '！', '？', '；', '!', '?'))
+        pause = next_word is not None and next_word['final_start_s'] - w['final_end_s'] >= .25
+        limit = next_word is not None and length + len(word_text(next_word)) > max_chars
+        if safe_break and (limit or punctuation or pause or next_word is None):
+            lines.append([first, i])
             first, length = i + 1, 0
-    if first <= len(words['words']):
-        pages.append({'lines': [[first, len(words['words'])]], 'emphasis': []})
+            if len(lines) == 2 or punctuation or pause or next_word is None:
+                pages.append({'lines': lines, 'emphasis': []})
+                lines = []
     if out.exists():
         raise FileExistsError('Caption draft already exists; edit it or choose a new output')
     draft = {'revision': words['revision'], 'review': 'not_checked', 'corrections': [], 'pages': pages}
     save(out, draft)
     rows = ['index\tkey\ttext'] + [f'{i}\t{key(w)}\t{word_text(w)}' for i, w in enumerate(words['words'], 1)]
     out.with_suffix('.tsv').write_text('\n'.join(rows) + '\n', encoding='utf-8')
-    return {'pages': len(pages), 'draft': str(out), 'index': str(out.with_suffix('.tsv'))}
+    review = out.with_suffix('.review.tsv')
+    rows = ['page\tfirst\tlast\tstart_s\tduration_s\ttext\tflags']
+    for i, page in enumerate(pages, 1):
+        a, b = page['lines'][0][0], page['lines'][-1][1]
+        texts = [''.join(word_text(w) for w in ws[x-1:y]) for x,y in page['lines']]
+        duration = ws[b-1]['final_end_s'] - ws[a-1]['final_start_s']
+        flags = (['short_card'] if duration < .4 else []) + (['long_line'] if any(len(t) > max_chars for t in texts) else [])
+        rows.append(f"{i}\t{a}\t{b}\t{ws[a-1]['final_start_s']:.3f}\t{duration:.3f}\t{' / '.join(texts)}\t{','.join(flags)}")
+    review.write_text('\n'.join(rows) + '\n', encoding='utf-8')
+    return {'pages': len(pages), 'draft': str(out), 'index': str(out.with_suffix('.tsv')), 'review': str(review)}
+
+
+def merge_caption_edits(draft, edits):
+    if edits.get('revision') != draft['revision']:
+        raise ValueError('Stale caption edits revision')
+    merged = copy.deepcopy(draft)
+    merged['corrections'] = merged.get('corrections', []) + edits.get('corrections', [])
+    used = set()
+    for change in edits.get('pages', []):
+        i = change['page']
+        if type(i) is not int or not 1 <= i <= len(merged['pages']) or i in used:
+            raise ValueError('Caption edits require unique valid page indexes')
+        used.add(i)
+        merged['pages'][i-1].update({k:v for k,v in change.items() if k in ('lines', 'emphasis', 'takeaway')})
+    for highlight in edits.get('highlights', []):
+        matches = [p for p in merged['pages'] if p['lines'][0][0] <= highlight['first'] <= highlight['last'] <= p['lines'][-1][1]]
+        if len(matches) != 1:
+            raise ValueError(f'Highlight must fit one page: {highlight}')
+        matches[0].setdefault('emphasis', []).append(highlight)
+    merged['review'] = edits.get('review', draft.get('review', 'not_checked'))
+    return merged
+
+
+def rebase_word_indexes(old_words, words):
+    """Validate unchanged text/IDs or explicit timing lineage; never infer new takes."""
+    parent = words.get('source_parent_revision') == old_words.get('source_revision')
+    same = old_words.get('source_revision') == words.get('source_revision')
+    if not old_words.get('source_revision') or not (same or parent):
+        raise ValueError('Caption rebase needs a reviewed draft and the same source_revision')
+    old = old_words['words']; new = words['words']
+    old_by_id = {w['id']: (i,w) for i,w in enumerate(old,1)}
+    if len(old_by_id) != len(old) or len({w['id'] for w in new}) != len(new):
+        raise ValueError('Caption rebase requires unique stable source word IDs')
+    positions = []; fixes = {r['word_id']:r for r in words.get('source_timing_corrections',[]) if 'word_id' in r}
+    for w in new:
+        if w['id'] not in old_by_id:
+            raise ValueError('New words/takes need fresh caption review')
+        i, previous = old_by_id[w['id']]; positions.append(i)
+        if any(w.get(k) != previous.get(k) for k in ('text','corrected_text')):
+            raise ValueError('Source word content changed; review captions again')
+        before=[previous['source_start_s'],previous['source_end_s']]
+        after=[w['source_start_s'],w['source_end_s']]
+        if before != after:
+            fix=fixes.get(w['id'],{})
+            if not (parent and fix.get('old_range_s')==before and fix.get('new_range_s')==after
+                    and str(fix.get('evidence','')).strip()):
+                raise ValueError('Source timing changed without verified lineage; review captions again')
+    if positions != sorted(set(positions)):
+        raise ValueError('Reordered content needs fresh caption review')
+    return {old_index: new_index for new_index,old_index in enumerate(positions,1)}
+
+
+def rebase_pauses(old_decisions, decisions, old_words, words):
+    rebase_word_indexes(old_words,words)
+    key=lambda r:(r['left_key'].partition(':')[2],r['right_key'].partition(':')[2],r['left_context'],r['right_context'])
+    lookup={key(r):r for r in old_decisions['boundaries']}; groups=[]; pending=[]
+    for i,row in enumerate(decisions['boundaries'],1):
+        previous=lookup.get(key(row))
+        if previous and previous.get('category') and previous.get('reason'):
+            groups.append({'indexes':[i],**{k:previous[k] for k in ('category','reason','preserve','target_ms') if k in previous}})
+        else:
+            pending.append({'index':i,**row})
+    return {'revision':decisions['revision'],'groups':groups,'pending':pending,
+            'rebase':{'from_revision':old_decisions['revision'],'reused_boundaries':len(groups)}}
+
+
+def rebase_caption(old_words, old_draft, words):
+    """Reuse reviewed semantic pages only for a deletion-only, same-source edit."""
+    if old_draft.get('review') != 'reviewed' or old_draft.get('revision') != old_words['revision']:
+        raise ValueError('Caption rebase needs a reviewed matching draft')
+    mapped=rebase_word_indexes(old_words,words); old=old_words['words']
+    def span(a,b):
+        indexes = [mapped[i] for i in range(a,b+1) if i in mapped]
+        return [indexes[0],indexes[-1]] if indexes else None
+    pages = []; changed = []
+    for n,page in enumerate(old_draft['pages'],1):
+        lines = [value for a,b in page['lines'] if (value:=span(a,b))]
+        if not lines:
+            changed.append(n); continue
+        current = copy.deepcopy(page); current['lines'] = lines; current['emphasis'] = []
+        if any(i not in mapped for a,b in page['lines'] for i in range(a,b+1)):
+            changed.append(n)
+        for emphasis in page.get('emphasis',[]):
+            a,b = emphasis['first'],emphasis['last']; value = span(a,b)
+            if value and any(i not in mapped for i in range(a,b+1)):
+                raise ValueError('Partly deleted emphasis needs explicit semantic review')
+            if value:
+                current['emphasis'].append({**emphasis,'first':value[0],'last':value[1]})
+        current.pop('takeaway',None)  # Recomputed from remaining words, not stale text.
+        pages.append(current)
+    corrections = [{**fix,'word':mapped[fix['word']]} for fix in old_draft.get('corrections',[]) if fix['word'] in mapped]
+    return {'revision':words['revision'],'review':'reviewed','pages':pages,'corrections':corrections,
+            'rebase':{'from_revision':old_words['revision'],'changed_pages':changed,
+                      'removed_word_ids':[w['id'] for i,w in enumerate(old,1) if i not in mapped],
+                      'method':'stable source IDs/text; deletion-only or evidenced direct timing lineage; timing/layout validation still required'}}
 
 
 def compile_authored(words, plan, draft):
@@ -213,6 +356,16 @@ def compile_authored(words, plan, draft):
         errors.append({'error': 'Word coverage/order mismatch',
                        'missing': [i for i in range(1, len(ws) + 1) if not counts[i]],
                        'duplicates': [i for i, count in counts.items() if count > 1]})
+    if errors:
+        return None, errors
+    # Report all overlapping boundaries with page numbers, not a generic failure.
+    fps = plan['fps']['num'] / plan['fps']['den']
+    lookup = {key(w): w for w in ws}
+    for i, (left, right) in enumerate(zip(pages, pages[1:]), 1):
+        end = frame(lookup[left['lines'][-1][-1]]['final_end_s'], fps)
+        start = frame(lookup[right['lines'][0][0]]['final_start_s'], fps)
+        if end > start:
+            errors.append({'page': i, 'next_page': i+1, 'error': 'Overlapping pages', 'overlap_frames': end-start})
     if errors:
         return None, errors
     try:
@@ -271,11 +424,11 @@ def write_ass(captions, plan, target, font):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['index', 'select', 'caption-draft', 'caption-build'])
-    for name in ['transcript', 'selection', 'review', 'source', 'ffprobe', 'words', 'plan', 'draft', 'out']:
+    p.add_argument('action', choices=['index', 'select', 'pause-author', 'pause-rebase', 'caption-draft', 'caption-build', 'caption-rebase'])
+    for name in ['transcript', 'selection', 'review', 'source', 'ffprobe', 'words', 'plan', 'draft', 'out', 'decisions', 'edits', 'old-words', 'old-decisions']:
         p.add_argument('--' + name, type=Path)
     p.add_argument('--font', type=Path, default=FONT)
-    p.add_argument('--fps', type=int, default=30)
+    p.add_argument('--fps', type=int, help='Output FPS override; defaults to the exact source frame rate.')
     p.add_argument('--width', type=int); p.add_argument('--height', type=int)
     a = p.parse_args(argv)
     if a.action == 'index':
@@ -285,17 +438,38 @@ def main(argv=None):
                         load(a.review) if a.review else None)
     elif a.action == 'caption-draft':
         result = caption_draft(load(a.words), load(a.plan), a.out)
+    elif a.action == 'pause-author':
+        authored = author_pauses(load(a.decisions), load(a.draft))
+        save(a.out, authored)
+        result = {'status': 'pass', 'boundaries': len(authored['boundaries']), 'out': str(a.out)}
+    elif a.action == 'caption-rebase':
+        if a.out.exists():
+            raise FileExistsError('Caption rebase uses a new output; existing drafts remain unchanged')
+        draft = rebase_caption(load(a.old_words),load(a.draft),load(a.words))
+        save(a.out,draft)
+        result = {'status':'pass','out':str(a.out),'pages':len(draft['pages']),**draft['rebase']}
+    elif a.action == 'pause-rebase':
+        if a.out.exists():
+            raise FileExistsError('Pause rebase uses a new output')
+        draft=rebase_pauses(load(a.old_decisions),load(a.decisions),load(a.old_words),load(a.words))
+        save(a.out,draft)
+        result={'status':'decision_required' if draft['pending'] else 'pass','out':str(a.out),
+                'pending':draft['pending'],**draft['rebase']}
     else:
         plan = load(a.plan)
-        result, errors = compile_authored(load(a.words), plan, load(a.draft))
+        draft = load(a.draft)
+        if a.edits:
+            draft = merge_caption_edits(draft, load(a.edits))
+        result, errors = compile_authored(load(a.words), plan, draft)
         save(a.out / 'validation.json', {'status': 'fail' if errors else 'pass', 'errors': errors})
         if errors:
             print(json.dumps({'status': 'fail', 'errors': errors}, ensure_ascii=False)); return 1
         a.out.mkdir(parents=True, exist_ok=True)
         write_ass(result, plan, a.out / 'captions.ass', a.font)
         save(a.out / 'captions.json', result)
+        save(a.out / 'authoring.resolved.json', draft)
         write_srt(result, a.out / 'captions.srt')
-        result = {'status': 'pass', 'pages': len(result['captions']), 'out': str(a.out)}
+        result = {'status': 'pass', 'pages': len(result['captions']), 'warnings': result['warnings'], 'out': str(a.out)}
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

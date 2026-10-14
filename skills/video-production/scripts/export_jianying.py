@@ -30,12 +30,16 @@ def normalize(plan, captions=None, layers=None):
     """Convert the existing original-speed edit plan to independent editable clips."""
     revision = plan['revision']
     fps = plan['fps']['num'] / plan['fps']['den']
-    if not revision or not math.isfinite(fps) or fps <= 0 or fps != int(fps):
-        raise ValueError('Jianying export currently requires an integer FPS and a revision')
+    if not revision or not math.isfinite(fps) or fps < 1:
+        raise ValueError('Jianying export requires a positive FPS and a revision')
     if type(plan['duration_frames']) is not int or plan['duration_frames'] <= 0:
         raise ValueError('Invalid duration_frames')
     duration = micros(plan['duration_frames'] / fps)
     clips, warnings, ids = [], [], set()
+    draft_fps = math.floor(fps + .5)
+    if fps != draft_fps:
+        warnings.append(f'原时间轴/MP4保持{plan["fps"]["num"]}/{plan["fps"]["den"]}fps；'
+                        f'剪映编辑网格为{draft_fps}fps，片段和字幕按原时间轴精确微秒保存，未变速；应用内帧量化须另验。')
     previous = 0
     for s in plan.get('segments', []):
         if s['id'] in ids:
@@ -113,7 +117,8 @@ def normalize(plan, captions=None, layers=None):
             raise ValueError('Overlapping clips on the same track; use separate track names')
     # Place text above images/videos even when captions were supplied before extra layers.
     tracks = dict(sorted(tracks.items(), key=lambda pair: pair[1][0]['kind'] == 'text'))
-    return dict(revision=revision, fps=int(fps), duration_us=duration, tracks=tracks, warnings=warnings)
+    return dict(revision=revision, fps=draft_fps, timeline_fps=plan['fps'],
+                duration_us=duration, tracks=tracks, warnings=warnings)
 
 
 def sha256(path):
@@ -153,6 +158,8 @@ def export_project(plan, out, captions=None, layers=None, base_dir=None, name=No
     width, height = plan['width'], plan['height']
     if any(type(v) is not int or v <= 0 for v in (width, height)):
         raise ValueError('Provide positive integer width and height in the edit plan')
+    if plan.get('output_orientation') == 'portrait' and width >= height:
+        raise ValueError('Talking-head draft canvas must be portrait (height > width)')
     base_dir = Path(base_dir or '.').resolve()
     sources = {}
     for track in timeline['tracks'].values():

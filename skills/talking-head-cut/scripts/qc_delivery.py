@@ -42,7 +42,14 @@ def main(argv=None):
     if 'width' in plan and 'height' in plan:
         findings.append({'check': 'dimensions', 'status': 'pass' if
                          (video.get('width'), video.get('height')) == (plan['width'], plan['height']) else 'fail'})
-    frame_probe = run([args.ffprobe, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
+    if plan.get('output_orientation') == 'portrait':
+        width, height = video.get('width', 0), video.get('height', 0)
+        rotation = next((s['rotation'] for s in video.get('side_data_list', []) if 'rotation' in s), 0)
+        if abs(round(rotation)) % 180 == 90:
+            width, height = height, width
+        findings.append({'check': 'portrait', 'status': 'pass' if 0 < width < height else 'fail',
+                         'display_width': width, 'display_height': height})
+    frame_probe = run([args.ffprobe, '-v', 'error', '-threads', '0', '-select_streams', 'v:0', '-show_entries',
                        'frame=best_effort_timestamp_time', '-of', 'json', args.media])
     try:
         frames = json.loads(frame_probe.stdout)['frames']

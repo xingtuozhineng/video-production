@@ -66,6 +66,24 @@ def join_rows(plan, words):
     return rows
 
 
+def selection_rows(selection, transcript):
+    if not transcript or selection.get('source_revision') != transcript.get('revision'):
+        raise ValueError('Selection review requires its source transcript revision')
+    words = transcript['words']
+    text = lambda ws: ''.join(w.get('corrected_text', w.get('text', '')) for w in ws)
+    rows = []
+    for i, item in enumerate(selection['ranges'], 1):
+        a, b = item['first'], item['last']
+        if type(a) is not int or type(b) is not int or not 1 <= a <= b <= len(words):
+            raise ValueError(f'Invalid selection range {i}')
+        rows.append({'index': i, 'first_word': a, 'last_word': b,
+                     'start_s': words[a-1]['source_start_s'], 'end_s': words[b-1]['source_end_s'],
+                     'first_text': text(words[a-1:min(a+2,b)]), 'last_text': text(words[max(a-1,b-3):b]),
+                     'before': text(words[max(0,a-4):a-1]), 'after': text(words[b:b+3]),
+                     'text': text(words[a-1:b]), 'reason': item.get('reason', '')})
+    return rows
+
+
 def inspect(kind, doc, *, words=None, span=None, window=None, text=None, offset=0, limit=40, max_chars=200):
     if not 1 <= limit <= 200 or offset < 0 or not 1 <= max_chars <= 4000:
         raise ValueError('limit 1..200, nonnegative offset, max-text-chars 1..4000 required')
@@ -85,6 +103,8 @@ def inspect(kind, doc, *, words=None, span=None, window=None, text=None, offset=
         rows = [{'index': i, **row} for i, row in enumerate(doc['boundaries'], 1)]
     elif kind == 'joins':
         rows = join_rows(doc, words)
+    elif kind == 'selection':
+        rows = selection_rows(doc, words)
     else:
         raise ValueError('Unknown inspection kind')
     matched = []
@@ -119,7 +139,7 @@ def inspect(kind, doc, *, words=None, span=None, window=None, text=None, offset=
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--kind', required=True, choices=('script', 'words', 'utterances', 'blocks', 'pauses', 'joins'))
+    parser.add_argument('--kind', required=True, choices=('script', 'words', 'utterances', 'blocks', 'pauses', 'joins', 'selection'))
     parser.add_argument('--input', type=Path, required=True)
     parser.add_argument('--words', type=Path)
     parser.add_argument('--range', dest='span', help='Inclusive original word/paragraph/boundary FIRST:LAST indexes')

@@ -18,6 +18,7 @@ class RecordingReviewTests(unittest.TestCase):
         transcript = {'revision': 'source', 'words': words}
         review = draft_review(transcript)
         review.update(status='reviewed', mode='guided_audible', evidence='原片开中末领读/复述连续样本已核对')
+        review['content_review'] = {'status': 'reviewed', 'evidence': '正文与领读/拍摄交流已核对，例外写入spans'}
         review['spans'] = [{'first': g['first'], 'last': g['last']} for g in utterance_groups(words)]
         for i, span in enumerate(review['spans']):
             span.update(role='prompt' if i == 0 else 'performer', group='sentence-1',
@@ -44,6 +45,7 @@ class RecordingReviewTests(unittest.TestCase):
             draft = load(Path(result['recording_review']))
             self.assertEqual(draft['mode'], 'unknown')
             self.assertEqual(draft['spans'], [])
+            self.assertEqual(draft['content_review'], {'status': 'not_checked', 'evidence': ''})
             self.assertEqual({s['role'] for s in draft['speaker_roles']}, {'unknown'})
             Path(result['recording_review']).write_text(json.dumps(review), encoding='utf-8')
             index(transcript, out)
@@ -146,6 +148,7 @@ class RecordingReviewTests(unittest.TestCase):
         transcript, _, selection = self.fixture()
         review = draft_review(transcript)
         review.update(status='reviewed', mode='guided_audible', evidence='相邻示范复述样本已确认')
+        review['content_review'] = {'status': 'reviewed', 'evidence': '正式正文与示范已区分'}
         for item in review['speaker_roles']:
             item.update(role='prompt' if item['speaker_id'] == 0 else 'performer', evidence='连续样本核对')
         plan, mapped = self.run_select(transcript, review, selection)
@@ -159,6 +162,7 @@ class RecordingReviewTests(unittest.TestCase):
         transcript, _, selection = self.fixture()
         review = draft_review(transcript)
         review.update(status='reviewed', mode='mixed', evidence='大部分段落身份稳定，局部待核对')
+        review['content_review'] = {'status': 'reviewed', 'evidence': '已核对发言用途，存疑例外保持unknown'}
         for item in review['speaker_roles']:
             item.update(role='performer', evidence='核对过的主角编号')
         review['spans'] = [{'first': 3, 'last': 3, 'role': 'unknown'}]
@@ -174,6 +178,75 @@ class RecordingReviewTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, error):
                     select(transcript, selection, Path('raw'), 'ffprobe', Path('edit'), review=changed)
                 probe.assert_not_called()
+
+    def content_fixture(self, texts):
+        transcript, _, _ = self.fixture(tuple(7 for _ in texts))
+        for word, text in zip(transcript['words'], texts):
+            word['text'] = text
+            word['utterance_id'] = 'mixed-utterance'
+        review = draft_review(transcript)
+        review.update(status='reviewed', mode='solo', evidence='原片连续画面已确认均为同一出镜者')
+        review['speaker_roles'][0].update(role='performer', evidence='出镜者的原声与嘴型对应')
+        review['content_review'] = {'status': 'reviewed', 'evidence': '结合前后文核对正文与拍摄过程发言'}
+        selection = {'source_revision': 'source', 'ranges': [
+            {'first': 1, 'last': len(texts), 'reason': '候选正文'}]}
+        return transcript, review, selection
+
+    def test_speaker_identity_alone_cannot_replace_content_purpose_review(self):
+        transcript, review, selection = self.content_fixture(['这句怎么说，重来一遍'])
+        for value in (None, {}, {'status': 'not_checked', 'evidence': '尚未核对'},
+                      {'status': 'reviewed', 'evidence': ''}):
+            review['content_review'] = value
+            with self.subTest(value=value), patch('authoring.subprocess.run') as probe:
+                with self.assertRaisesRegex(ValueError, 'Content-purpose review'):
+                    select(transcript, selection, Path('raw'), 'ffprobe', Path('edit'), review=review)
+                probe.assert_not_called()
+        review.pop('content_review')  # Existing role files must be reviewed, not silently approved.
+        with self.assertRaisesRegex(ValueError, 'existing transcript may be reused'):
+            self.run_select(transcript, review, selection)
+
+    def test_same_performer_rehearsal_and_crew_talk_are_excluded_without_losing_body(self):
+        transcript, review, selection = self.content_fixture([
+            '今天讲客户交付', '刚才没说好，这句重来', '提词器往下一点', '完整交付需要验收'])
+        original = copy.deepcopy(transcript)
+        review['spans'] = [{'first': 2, 'last': 3, 'role': 'production',
+                            'evidence': '源片2.5至5.5秒为试词和拍摄指令，随后重新面向观众讲述'}]
+        with self.assertRaisesRegex(ValueError, 'role production'):
+            self.run_select(transcript, review, selection)
+        selection['ranges'] = [{'first': i, 'last': i, 'reason': '保留正式表达'} for i in (1, 4)]
+        plan, mapped = self.run_select(transcript, review, selection)
+        self.assertEqual([w['id'] for w in mapped['words']], ['w0', 'w3'])
+        self.assertEqual(set(mapped['excluded_word_ids']), {'w1', 'w2'})
+        self.assertEqual(transcript, original)
+        self.assertEqual(len(plan['segments']), 2)
+
+    def test_quoted_self_talk_and_quiet_formal_narration_are_not_keyword_filtered(self):
+        transcript, review, selection = self.content_fixture([
+            '我当时就想，这事靠谱吗', '客户说这句重来，于是我们重做方案', '我想想，这里还有一个条件'])
+        review['content_review']['evidence'] = '三句均为面向观众的叙述，引用与思考过程属于正文；末句虽小声仍连续讲述'
+        _, mapped = self.run_select(transcript, review, selection)
+        self.assertEqual([w['text'] for w in mapped['words']], [w['text'] for w in transcript['words']])
+        self.assertEqual(review['spans'], [])
+
+    def test_uncertain_purpose_cannot_enter_selected_ranges(self):
+        transcript, review, selection = self.content_fixture(['正式开头', '我想想', '正式结尾'])
+        review['spans'] = [{'first': 2, 'last': 2, 'role': 'unknown',
+                            'evidence': '缺少上下文，不能确认是试词还是正文'}]
+        with self.assertRaisesRegex(ValueError, 'role unknown'):
+            self.run_select(transcript, review, selection)
+        selection['ranges'] = [{'first': 1, 'last': 1, 'reason': '已确认的独立正式句'}]
+        _, mapped = self.run_select(transcript, review, selection)
+        self.assertEqual(len(mapped['words']), 1)
+
+    def test_untranscribed_production_talk_inside_body_requires_split(self):
+        transcript, review, selection = self.content_fixture(['正式开头', '正式结尾'])
+        review['excluded_audio'] = [{'start_s': 1.8, 'end_s': 2.2, 'role': 'production',
+                                     'evidence': '源片间隙有未被ASR识别的试词'}]
+        with self.assertRaisesRegex(ValueError, 'crosses excluded audio'):
+            self.run_select(transcript, review, selection)
+        selection['ranges'] = [{'first': i, 'last': i, 'reason': '试词两侧的正式表达'} for i in (1, 2)]
+        plan, _ = self.run_select(transcript, review, selection)
+        self.assertTrue(all(s['source_out_s'] <= 1.8 or s['source_in_s'] >= 2.2 for s in plan['segments']))
 
 
 if __name__ == '__main__':

@@ -1,4 +1,4 @@
-"""Validate authored roles/takes; never infer actor identity from ASR speaker IDs."""
+"""Validate authored roles, content purpose and takes; never guess from speaker IDs."""
 import hashlib
 import json
 import math
@@ -25,6 +25,7 @@ def draft_review(transcript):
                              for w in transcript['words'])
     return {'source_revision': transcript['revision'], 'transcript_hash': transcript_hash(transcript),
             'status': 'not_checked', 'mode': 'unknown', 'evidence': '',
+            'content_review': {'status': 'not_checked', 'evidence': ''},
             'speaker_roles': [{'channel_id': channel, 'speaker_id': speaker,
                                'role': 'unknown', 'evidence': ''} for channel, speaker in speakers],
             'spans': [],
@@ -43,6 +44,11 @@ def validate_review(transcript, selection, review):
         raise ValueError('Stale recording review; source transcript changed')
     if review.get('mode') not in ('solo', 'guided_audible', 'guided_inaudible', 'mixed') or not has_text(review.get('evidence')):
         raise ValueError('Recording review requires a mode and source audio/video evidence')
+    content_review = review.get('content_review')
+    if (not isinstance(content_review, dict) or content_review.get('status') != 'reviewed'
+            or not has_text(content_review.get('evidence'))):
+        raise ValueError('Content-purpose review not completed; confirm formal speech versus rehearsal/production '
+                         'in recording-review.json.content_review before select (existing transcript may be reused)')
     roles = ('performer', 'prompt', 'production', 'unknown')
     speakers = {}
     observed = {(w.get('channel_id', 0), w.get('effective_speaker_id', w.get('speaker_id')))

@@ -75,11 +75,12 @@ def normalize(raw, offset=0, revision='source-001'):
         for si, sentence in enumerate(transcript.get('sentences', [])):
             sid = f'c{channel}_s{si:05d}'
             ids = []
-            if sentence.get('text', '').strip() and not sentence.get('words'):
+            spoken = lambda value: bool(value.strip(' \t\r\n，。！？；：、,.!?;:\"“”‘’「」『』（）()【】[]…'))
+            if spoken(sentence.get('text', '')) and not sentence.get('words'):
                 raise ValueError('Missing word timestamps; never interpolate sentence timing')
             for wi, word in enumerate(sentence.get('words', [])):
                 text = word.get('text', '')
-                if not text.strip():
+                if not spoken(text):
                     continue
                 a, b = word.get('begin_time'), word.get('end_time')
                 if not all(type(t) in (int, float) and math.isfinite(t) for t in [a, b]) or not 0 <= a < b:
@@ -101,7 +102,7 @@ def normalize(raw, offset=0, revision='source-001'):
                                   'text': sentence.get('text', ''), 'word_ids': ids,
                                   'start': subset[0]['start'], 'end': max(w['end'] for w in subset),
                                   'speaker_id': sentence.get('speaker_id')})
-            elif sentence.get('text', '').strip():
+            elif spoken(sentence.get('text', '')):
                 raise ValueError('Nonempty sentence has no usable timed words')
     if not words:
         raise ValueError('No timed speech; inspect audio/provider result')
@@ -116,9 +117,12 @@ def stamp(seconds):
     return f'{h:02}:{m:02}:{s:02},{ms:03}'
 
 
-def write_outputs(raw, out, offset=0):
+def write_outputs(raw, out, offset=0, model='paraformer-v2'):
     out = Path(out); out.mkdir(parents=True, exist_ok=True)
     doc = normalize(raw, offset)
+    doc['model'] = model
+    if model != 'paraformer-v2':
+        doc['provider'] = 'bailian-' + model
     save(out / 'transcript.source.json', doc)
     index = {w['id']: w for w in doc['words']}
     lines, srt = ['# 原声转写（待校对；时间为原片秒）', ''], []
@@ -141,8 +145,8 @@ def run(media, out, cfg, execute=False, ffmpeg=None, max_polls=40, poll_seconds=
         raise ValueError('Input media missing')
     base = api_base(cfg)
     model = cfg.get('BAILIAN_ASR_MODEL', 'paraformer-v2')
-    if model != 'paraformer-v2':
-        raise ValueError('This word-timestamp adapter supports paraformer-v2 only')
+    if model not in ('paraformer-v2', 'fun-asr'):
+        raise ValueError('This word-timestamp adapter supports paraformer-v2 and fun-asr only')
     if audio_format not in ('wav', 'mp3'):
         raise ValueError('audio_format must be wav or mp3')
     if speaker_count is not None and (not diarization or type(speaker_count) is not int or not 2 <= speaker_count <= 100):
@@ -173,10 +177,11 @@ def run(media, out, cfg, execute=False, ffmpeg=None, max_polls=40, poll_seconds=
             audio = out / ('analysis.' + audio_format)
             prepare(media, audio, ffmpeg)
             uri = uploader(audio, client, model)
-            body = {'model': model, 'input': {'file_urls': [uri]},
-                    'parameters': {'channel_id': [0], 'disfluency_removal_enabled': False,
-                                   'timestamp_alignment_enabled': True, 'language_hints': ['zh', 'en'], **speaker_options}}
-            state = {'request_hash': sig, 'status': 'submission_unknown'}
+            parameters = {'channel_id': [0], 'language_hints': ['zh'], **speaker_options}
+            if model == 'paraformer-v2':
+                parameters.update(disfluency_removal_enabled=False,timestamp_alignment_enabled=True,language_hints=['zh','en'])
+            body = {'model': model, 'input': {'file_urls': [uri]}, 'parameters': parameters}
+            state = {'request_hash': sig, 'status': 'submission_unknown', 'model': model}
             save(state_path, state)
             try:
                 response = client.call('POST', '/services/audio/asr/transcription', body, True, True)
@@ -208,7 +213,7 @@ def run(media, out, cfg, execute=False, ffmpeg=None, max_polls=40, poll_seconds=
                     sleep(poll_seconds)
             else:
                 raise RuntimeError('ASR pending; resume the same output directory')
-        return write_outputs(load(raw_path), out)
+        return write_outputs(load(raw_path), out, model=model)
     finally:
         lock.unlink(missing_ok=True)
 

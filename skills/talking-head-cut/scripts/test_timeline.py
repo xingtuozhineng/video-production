@@ -2,6 +2,7 @@ import copy
 import unittest
 
 from check_timeline import validate
+from map_words import remap
 
 
 def plan(source_fps=50, output_fps=30):
@@ -23,6 +24,17 @@ def plan(source_fps=50, output_fps=30):
 
 
 class TimelineTests(unittest.TestCase):
+    def test_word_mapping_retains_verified_source_boundary_lineage(self):
+        correction={'word_id':'w','old_range_s':[8,8.1],'new_range_s':[8,8.2],'evidence':'源短窗偏移核实'}
+        transcript={'revision':'corrected','source_parent_revision':'original',
+                    'source_timing_corrections':[correction],
+                    'words':[{'id':'w','text':'群','source_start_s':8,'source_end_s':8.2}]}
+        result=remap(transcript,plan())
+        self.assertEqual(result['source_revision'],'corrected')
+        self.assertEqual(result['source_parent_revision'],'original')
+        self.assertEqual(result['source_timing_corrections'],[correction])
+        self.assertAlmostEqual(result['words'][0]['final_end_s'],1.)
+
     def test_distinct_source_and_output_rates_pass(self):
         report = validate(plan())
         self.assertEqual(report['status'], 'pass')

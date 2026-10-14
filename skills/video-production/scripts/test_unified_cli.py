@@ -8,13 +8,19 @@ import video_production as cli
 
 
 class UnifiedCliTests(unittest.TestCase):
+    def test_pre_render_review_forwards_required_workspace_to_runner(self):
+        args = cli.build_parser().parse_args(['pre-render-review', '--workspace-root', 'workspace',
+            '--project-dir', 'project', '--plan', 'plan.json', '--captions-dir', 'captions'])
+        forwarded = cli.forwarded(args)
+        self.assertEqual(forwarded[forwarded.index('--workspace-root') + 1], 'workspace')
+
     def test_contract_is_derived_from_every_public_parser(self):
         parser = cli.build_parser()
         contract = cli.parser_contract(parser)
         self.assertEqual(set(contract['commands']),
                          {'prepare', 'check', 'init', 'tts', 'voice-create', 'voice-list', 'align', 'tighten', 'sample', 'screencast-preview', 'transcribe', 'compile', 'captions', 'render', 'qc',
-                          'hardware', 'index', 'select', 'pause-prepare', 'caption-draft', 'caption-build',
-                          'export', 'deliver', 'job-status', 'job-stop', 'job-resume', 'job-watch', 'inspect', 'screencast-check',
+                          'hardware', 'index', 'select', 'pause-prepare', 'pause-author', 'pause-rebase', 'caption-draft', 'caption-build', 'caption-rebase', 'sync-check', 'audio-review', 'talking-batch',
+                          'export', 'deliver', 'pre-render-review', 'job-status', 'job-stop', 'job-resume', 'job-watch', 'inspect', 'screencast-check',
                           'screencast-build', 'screencast-deliver'})
         render = contract['commands']['render']
         encoder = next(a for a in render['arguments'] if a['dest'] == 'encoder')
@@ -46,6 +52,42 @@ class UnifiedCliTests(unittest.TestCase):
             forwarded = cli.forwarded(args)
             self.assertEqual(forwarded[-2:], ['--ffmpeg', 'shared-ffmpeg'])
             self.assertNotIn('--workspace-root', forwarded)
+            self.assertNotIn('--width', forwarded)
+            self.assertNotIn('--height', forwarded)
+
+    def test_select_does_not_forward_fixed_output_specs(self):
+        with patch('video_production.tools', return_value={'ffprobe': 'shared-probe'}):
+            args = cli.build_parser().parse_args(['select', '--workspace-root', '.', '--source', 'raw.mp4',
+                '--transcript', 'words.json', '--selection', 'selection.json', '--review', 'review.json', '--out', 'edit'])
+            forwarded = cli.forwarded(args)
+        for flag in ('--fps', '--width', '--height'):
+            self.assertNotIn(flag, forwarded)
+
+    def test_audio_review_is_dry_by_default_and_paid_run_is_backgrounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp); (root/'video-production-deps').mkdir()
+            (root/'video-production-deps/tools.json').write_text(json.dumps({'ffmpeg':'shared-ffmpeg','ffprobe':'shared-probe'}))
+            argv=['audio-review','--workspace-root',str(root),'--project-dir',str(root/'project'),
+                  '--source','raw.mp4','--stage','source']
+            with patch('video_production.subprocess.run') as run, patch('managed_job.start') as start:
+                run.return_value.returncode=0
+                cli.main(argv); start.assert_not_called()
+                self.assertNotIn('--execute',run.call_args.args[0])
+                start.return_value={'job_id':'audio-review'}
+                cli.main(argv+['--execute']); start.assert_called_once()
+                self.assertEqual(start.call_args.args[0],root/'project/qc/audio-review/.job')
+                self.assertIn('shared-probe',start.call_args.args[1])
+
+    def test_caption_build_resolves_python_from_plan_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp); (root / 'video-production-deps').mkdir()
+            runtime = root / 'python.exe'; runtime.touch()
+            (root / 'video-production-deps/tools.json').write_text(json.dumps({'python': str(runtime)}))
+            with patch('video_production.subprocess.run') as run:
+                run.return_value.returncode = 0
+                cli.main(['caption-build', '--words', str(root/'work/words.json'), '--plan', str(root/'work/plan.json'),
+                          '--draft', str(root/'work/draft.json'), '--out', str(root/'work/captions')])
+                self.assertEqual(run.call_args.args[0][0], str(runtime))
 
     def test_dispatch_uses_argv_list_not_shell(self):
         with patch('video_production.subprocess.run') as run:

@@ -57,7 +57,7 @@ def build_parser():
 
     p = command(sub, 'inspect', 'Query scripts, words, utterances, pauses or final joins without helper code.',
                 HERE / 'inspect_inputs.py', ['bounded JSON on stdout; optional --out report'])
-    p.add_argument('--kind', required=True, choices=('script', 'words', 'utterances', 'blocks', 'pauses', 'joins'))
+    p.add_argument('--kind', required=True, choices=('script', 'words', 'utterances', 'blocks', 'pauses', 'joins', 'selection'))
     add_path(p, '--input', 'Script DOCX/TXT/MD or canonical transcript/decisions/plan JSON.')
     add_path(p, '--words', 'Same-revision mapped words, required for joins.', required=False)
     p.add_argument('--range', help='Inclusive original indexes FIRST:LAST.')
@@ -67,6 +67,27 @@ def build_parser():
     p.add_argument('--limit', type=int, default=40)
     p.add_argument('--max-text-chars', type=int, default=200)
     add_path(p, '--out', 'Optional bounded query report.', required=False)
+
+    p = command(sub, 'talking-batch', 'Run deterministic talking-head stages and return complete decision packets.',
+                HERE / 'talking_batch.py', ['<project-dir>/work/batch/state.json', 'complete stage review packets', 'output/handoff.json'])
+    for flag in ('workspace-root', 'project-dir'):
+        add_path(p, '--' + flag, flag)
+    p.add_argument('--stage', required=True, choices=('prepare', 'select', 'compile', 'review', 'deliver', 'evidence'))
+    p.add_argument('--ranges', help='Additional evidence windows in source seconds START:END,...')
+    add_path(p, '--env', 'Optional Skill .env path.', required=False)
+    p.add_argument('--execute', action='store_true', help='Authorize ASR and requested listening calls; prepare defaults to dry-run.')
+    p.add_argument('--audio-review', action='store_true', help='Include source, pre-render PCM and actual final Qwen-Omni review within the shared 0.2 CNY ledger.')
+    add_path(p, '--caption-draft', 'Reviewed same-revision rebased caption draft for review/deliver; otherwise use the compiled draft.', required=False)
+    p.add_argument('--foreground', action='store_true', help='Maintenance verification; prepare/review/deliver normally run in the background.')
+
+    p = command(sub, 'pre-render-review', 'Review current talking-head captions, boundaries and real PCM audio before video encoding.',
+                HERE/'pre_render_review.py', ['<project-dir>/work/pre-render/<input-signature>/review.md', 'decisions.json'])
+    for flag in ('workspace-root', 'project-dir', 'plan', 'captions-dir'):
+        add_path(p, '--'+flag, flag)
+    add_path(p, '--env', 'Optional Skill .env path.', required=False)
+    p.add_argument('--execute', action='store_true', help='Execute requested PCM timeline listening within the existing ledger.')
+    p.add_argument('--audio-review', action='store_true', help='Same 0.2 CNY ledger for source, PCM preview and actual final MP4.')
+    p.add_argument('--foreground', action='store_true', help='Maintenance verification only.')
 
     p = command(sub, 'screencast-check', 'Check page targets, camera and emphasis intervals.',
                 SKILL.parent / 'ppt-screencast' / 'scripts' / 'check_screencast_plan.py', ['<out>/plan-check.json'])
@@ -177,7 +198,9 @@ def build_parser():
     add_path(p, '--plan', 'Validated edit-plan.json.')
     add_path(p, '--out', 'Final MP4 path.')
     add_path(p, '--captions-ass', 'Optional ASS subtitle file.', required=False)
-    p.add_argument('--width', type=int, default=1920); p.add_argument('--height', type=int, default=1080)
+    p.add_argument('--audio-only', action='store_true', help='Render only exact timeline PCM to WAV before expensive video rendering.')
+    p.add_argument('--width', type=int, help='Output width override; defaults to the edit plan.')
+    p.add_argument('--height', type=int, help='Output height override; defaults to the edit plan.')
     p.add_argument('--encoder', choices=('auto', 'libx264', *ENCODERS), default='auto')
     p.add_argument('--preset', default='medium'); p.add_argument('--crf', type=int, default=18)
 
@@ -213,8 +236,15 @@ def build_parser():
     for flag in ['workspace-root', 'transcript', 'selection', 'source', 'out']:
         add_path(p, '--' + flag, flag)
     add_path(p, '--review', 'Reviewed recording-review.json: performer/prompt roles, repeated takes and excluded audio.')
-    p.add_argument('--fps', type=int, default=30)
-    p.add_argument('--width', type=int); p.add_argument('--height', type=int)
+    p.add_argument('--fps', type=int, help='Output FPS override; defaults to the exact source frame rate.')
+    p.add_argument('--width', type=int, help='Portrait output width override; defaults to the source display short edge.')
+    p.add_argument('--height', type=int, help='Portrait output height override; defaults to the source display long edge.')
+    p = author('pause-author', 'Apply compact semantic groups to all pause candidates with revision/coverage checks.')
+    for flag in ('decisions', 'draft', 'out'):
+        add_path(p, '--' + flag, flag)
+    p = author('pause-rebase', 'Reuse unchanged word-neighbor semantic decisions; return only changed boundaries for review.')
+    for flag in ('old-decisions','decisions','old-words','words','out'):
+        add_path(p,'--'+flag,flag)
     p = command(sub, 'pause-prepare', 'Prepare all pause decisions from selected words.',
                 TALKING / 'semantic_pacing.py', ['pause-decisions.json'])
     p.set_defaults(_prepare=True)
@@ -228,6 +258,26 @@ def build_parser():
     for flag in ['words', 'plan', 'draft', 'out']:
         add_path(p, '--' + flag, flag)
     add_path(p, '--font', 'Optional real font file; defaults to bundled Source Han Sans.', required=False)
+    add_path(p, '--edits', 'Optional sparse corrections, highlights and exceptional page replacements.', required=False)
+    p = author('caption-rebase', 'Migrate reviewed pages/corrections by stable source word IDs after deletion-only edits.')
+    for flag in ('old-words','draft','words','out'):
+        add_path(p,'--'+flag,flag)
+    p = command(sub, 'sync-check', 'Compare decoded delivery audio against bounded canonical timeline PCM windows.',
+                TALKING / 'sync_timeline.py', ['<out-dir>/sync.json'])
+    for flag in ('workspace-root', 'plan', 'media', 'out-dir'):
+        add_path(p, '--' + flag, flag)
+    p = command(sub, 'audio-review', 'Qwen-Omni source/final audio review with a shared CNY 0.2 per-video ledger.',
+                HERE / 'audio_review.py', ['<project-dir>/qc/audio-review/budget.json', '<project-dir>/qc/audio-review/latest.json'])
+    for flag in ('workspace-root', 'project-dir', 'source'):
+        add_path(p, '--' + flag, flag)
+    for flag in ('media', 'plan', 'env'):
+        add_path(p, '--' + flag, flag, required=False)
+    p.add_argument('--stage', choices=('source', 'final', 'both'), default='both')
+    p.add_argument('--focus', help='At most two final-media START:END windows, shared budget and cumulative limit.')
+    p.add_argument('--source-focus', help='At most four source START:END targets with context audio and actual mouth frames; stage source only.')
+    p.add_argument('--recheck-invalid', action='store_true', help='Explicit bounded re-listening for known-cost malformed cut replies; preserve original ledger and never retry unknown outcomes.')
+    p.add_argument('--execute', action='store_true', help='Authorize paid audio review within the shared CNY 0.2 cap; default dry-run.')
+    p.add_argument('--foreground', action='store_true', help='Local testing only; paid runs default to background.')
     p = command(sub, 'export', 'Export editable Jianying draft from the same timeline.',
                 HERE / 'export_jianying.py', ['--out draft directory'])
     add_path(p, '--plan', 'edit-plan.json with width/height.')
@@ -317,7 +367,7 @@ def forwarded(args):
         if dest == 'workspace_root':
             if command == 'check':
                 flag = '--project-dir'
-            elif command in ('prepare', 'init', 'deliver', 'screencast-deliver', 'screencast-preview', 'hardware'):
+            elif command in ('prepare', 'init', 'deliver', 'pre-render-review', 'screencast-deliver', 'screencast-preview', 'hardware', 'talking-batch'):
                 flag = '--workspace-root'
             else:
                 continue
@@ -341,6 +391,11 @@ def forwarded(args):
                 '--ffmpeg', tools(args.workspace_root)['ffmpeg']]
     if command == 'select':
         out += ['--ffprobe', tools(args.workspace_root)['ffprobe']]
+    if command == 'sync-check':
+        out += ['--ffmpeg', tools(args.workspace_root)['ffmpeg']]
+    if command == 'audio-review':
+        resolved = tools(args.workspace_root)
+        out += ['--ffmpeg', resolved['ffmpeg'], '--ffprobe', resolved['ffprobe']]
     if command == 'qc':
         resolved = tools(args.workspace_root)
         out += ['--ffmpeg', resolved['ffmpeg'], '--ffprobe', resolved['ffprobe']]
@@ -362,12 +417,34 @@ def main(argv=None):
         print(json.dumps(value, ensure_ascii=False, indent=2 if args.pretty else None))
         return 0
     runtime = sys.executable
-    if (getattr(args, 'workspace_root', None) and args._command not in ('prepare', 'init')
-            and (args.workspace_root / 'video-production-deps/tools.json').is_file()):
-        configured = tools(args.workspace_root).get('python')
+    workspace = getattr(args, 'workspace_root', None)
+    if workspace is None:
+        # Caption/compile commands have no workspace flag; infer it from their actual input path.
+        for field in ('plan', 'draft', 'decisions', 'words', 'transcript'):
+            path = getattr(args, field, None)
+            if path:
+                workspace = next((p for p in path.resolve().parents if (p / 'video-production-deps/tools.json').is_file()), None)
+                if workspace:
+                    break
+    if (workspace and args._command not in ('prepare', 'init')
+            and (workspace / 'video-production-deps/tools.json').is_file()):
+        configured = tools(workspace).get('python')
         if configured and Path(configured).is_file():
             runtime = configured
     command_line = [runtime, args._script, *forwarded(args)]
+    if (args._command == 'talking-batch' and not args.foreground
+            and (args.stage == 'deliver' or (args.stage in ('prepare', 'review') and args.execute))):
+        from managed_job import start
+        print(json.dumps(start(args.project_dir / 'work/batch/.job', command_line), ensure_ascii=False))
+        return 0
+    if args._command == 'audio-review' and args.execute and not args.foreground:
+        from managed_job import start
+        print(json.dumps(start(args.project_dir / 'qc/audio-review/.job', command_line), ensure_ascii=False))
+        return 0
+    if args._command == 'pre-render-review' and args.execute and not args.foreground:
+        from managed_job import start
+        print(json.dumps(start(args.project_dir/'work/pre-render/.job', command_line), ensure_ascii=False))
+        return 0
     if ((args._command in ('deliver', 'screencast-deliver', 'screencast-preview')
          or (args._command == 'tts' and args.execute)) and not args.foreground):
         from managed_job import start

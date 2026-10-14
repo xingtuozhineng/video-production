@@ -28,6 +28,22 @@ def extract(cmd, **kwargs): Path(cmd[-1]).write_bytes(b'offline audio fixture')
 def upload(*args): return 'oss://temporary/audio.wav'
 
 class Tests(unittest.TestCase):
+    def test_punctuation_only_provider_tokens_do_not_create_fake_tiny_speech(self):
+        raw=copy.deepcopy(RAW)
+        raw['transcripts'][0]['sentences'].append({'sentence_id':2,'text':'”. ',
+            'words':[{'text':'”','begin_time':2200,'end_time':2210}]})
+        self.assertEqual(len(asr.normalize(raw)['words']),3)
+
+    def test_fun_asr_preserves_word_contract_and_uses_its_supported_parameters(self):
+        with tempfile.TemporaryDirectory() as t, patch.object(prepare_asr_audio.subprocess,'run',side_effect=extract):
+            p=Path(t)/'input.wav'; p.write_bytes(b'fixture'); client=Client([PENDING,DONE])
+            asr.run(p,Path(t)/'out',{**CFG,'BAILIAN_ASR_MODEL':'fun-asr'},True,
+                    client=client,uploader=upload,fetch=lambda _:RAW,poll_seconds=0)
+            body=client.calls[0][2]
+            self.assertEqual(body['model'],'fun-asr')
+            self.assertEqual(body['parameters']['language_hints'],['zh'])
+            self.assertNotIn('timestamp_alignment_enabled',body['parameters'])
+            self.assertEqual(asr.load(Path(t)/'out/transcript.source.json')['model'],'fun-asr')
     def test_millisecond_precision_offset_ids(self):
         d = asr.normalize(RAW, 10)
         self.assertEqual(d['words'][0]['start'], 10.123)

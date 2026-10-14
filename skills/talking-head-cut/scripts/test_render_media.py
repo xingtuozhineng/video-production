@@ -12,10 +12,65 @@ import wave
 from unittest.mock import patch
 
 from render_timeline import main as render, graph
+from authoring import load, save, select
+from compile_timeline import compile_timeline
+from recording_review import draft_review
+from qc_delivery import main as qc
+from export_jianying import export_project
 
 
 @unittest.skipUnless(os.environ.get('VIDEO_TEST_FFMPEG'), 'Set VIDEO_TEST_FFMPEG/FFPROBE for real media tests')
 class RenderMediaTests(unittest.TestCase):
+    def test_default_select_compile_render_preserves_4k_rotation_and_fractional_fps(self):
+        ffmpeg, ffprobe = os.environ['VIDEO_TEST_FFMPEG'], os.environ['VIDEO_TEST_FFPROBE']
+        transcript = {'revision': 'source', 'words': [{'id': 'w1', 'speaker_id': 7,
+            'utterance_id': 'u1', 'source_start_s': .02, 'source_end_s': .08, 'text': '原声'}]}
+        selection = {'source_revision': 'source', 'ranges': [
+            {'first': 1, 'last': 1, 'reason': '保留原声'}]}
+        review = draft_review(transcript)
+        review.update(status='reviewed', mode='solo', evidence='合成测试的单一讲述声道')
+        review['content_review'] = {'status': 'reviewed', 'evidence': '已知测试正文无拍摄交流'}
+        review['speaker_roles'][0].update(role='performer', evidence='已知测试声道')
+        for width, height, rotation, rate, expected in [
+            (3840, 2160, 0, '50/1', (2160, 3840)),
+            (3840, 2160, 90, '50/1', (2160, 3840)),
+            (160, 96, 0, '30000/1001', (96, 160))]:
+            with self.subTest(size=expected, rotation=rotation, rate=rate), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp); source = root / 'raw.mp4'
+                subprocess.run([ffmpeg, '-v', 'error', '-f', 'lavfi', '-i',
+                    f'color=c=green:s={width}x{height}:r={rate}:d=0.2', '-f', 'lavfi', '-i',
+                    'sine=frequency=440:sample_rate=48000:duration=0.2', '-c:v', 'libx264',
+                    '-preset', 'ultrafast', '-pix_fmt', 'yuv420p', '-c:a', 'aac', str(source)], check=True)
+                if rotation:
+                    rotated = root / 'rotated.mp4'
+                    subprocess.run([ffmpeg, '-v', 'error', '-display_rotation', str(rotation),
+                        '-i', str(source), '-c', 'copy', str(rotated)], check=True)
+                    source = rotated
+                select(transcript, selection, source, ffprobe, root / 'edit', review=review)
+                selected = load(root / 'edit/selection-plan.json')
+                self.assertEqual((selected['width'], selected['height']), expected)
+                self.assertEqual(selected['fps'], dict(zip(('num', 'den'), map(int, rate.split('/')))))
+                plan, _, _, _ = compile_timeline(selected, transcript, load(root / 'edit/pause-decisions.json'))
+                save(root / 'plan.json', plan)
+                output = root / 'out.mp4'
+                render(['--source', str(source), '--plan', str(root / 'plan.json'), '--ffmpeg', ffmpeg,
+                        '--out', str(output), '--encoder', 'libx264', '--preset', 'ultrafast'])
+                metadata = json.loads(subprocess.check_output([ffprobe, '-v', 'error', '-show_streams',
+                    '-of', 'json', str(output)]))
+                video = next(s for s in metadata['streams'] if s['codec_type'] == 'video')
+                self.assertEqual((video['width'], video['height']), expected)
+                self.assertLess(video['width'], video['height'])
+                self.assertEqual(video['r_frame_rate'], rate)
+                self.assertTrue(all(s.get('rotation', 0) == 0 for s in video.get('side_data_list', [])))
+                self.assertEqual(qc(['--media', str(output), '--plan', str(root / 'plan.json'),
+                    '--ffmpeg', ffmpeg, '--ffprobe', ffprobe, '--out', str(root / 'qc.json')]), 0)
+                if rate == '50/1':
+                    export_project(plan, root / 'draft')
+                    draft = load(root / 'draft/draft_content.json')
+                    self.assertEqual((draft['canvas_config']['width'], draft['canvas_config']['height']), expected)
+                    self.assertEqual(draft['fps'], 50)
+                print(f'SOURCE_SPECS: {expected[0]}x{expected[1]} {rate} preserved; decode/PTS QC passed')
+
     def test_late_seek_matches_unseeked_frame_and_audio_reference(self):
         import numpy as np
         ffmpeg, ffprobe = os.environ['VIDEO_TEST_FFMPEG'], os.environ['VIDEO_TEST_FFPROBE']

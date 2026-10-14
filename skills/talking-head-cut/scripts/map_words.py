@@ -47,6 +47,7 @@ def remap(transcript, plan):
     elif abs(final_end * fps - plan['duration_frames']) > 1e-4:
         raise ValueError('Applied duration does not match final frame count')
     return {'revision': plan['revision'], 'source_revision': transcript['revision'], 'words': words,
+            **{k:transcript[k] for k in ('source_parent_revision','source_timing_corrections') if k in transcript},
             'excluded_word_ids': [w['id'] for w in source_words if w['id'] not in retained]}
 
 
