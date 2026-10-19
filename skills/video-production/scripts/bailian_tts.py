@@ -147,6 +147,18 @@ def run(script, out_dir, cfg, execute=False, model=None, voice=None, language_ty
     gap_s = int(gap_s) if gap_s == int(gap_s) else gap_s
     if script.resolve() in {out_dir.resolve() / name for name in ('voiceover.wav', 'script-sentences.json', 'tts-manifest.json')}:
         raise ValueError('TTS output must not overwrite the source script')
+    configured_base = api_base(cfg) if cfg.get('DASHSCOPE_BASE_URL') else ''
+    # Qwen3/Cherry uses the regional public speech endpoint. Select it before
+    # submitting, without changing the shared ASR config or retrying another host.
+    if not voice_record and configured_base:
+        host = urlsplit(configured_base).hostname
+        for suffix, speech_base in (
+            ('.cn-beijing.maas.aliyuncs.com', 'https://dashscope.aliyuncs.com/api/v1'),
+            ('.ap-southeast-1.maas.aliyuncs.com', 'https://dashscope-intl.aliyuncs.com/api/v1'),
+        ):
+            if host.endswith(suffix):
+                cfg = {**cfg, 'DASHSCOPE_BASE_URL': speech_base}
+                break
     sentences = read_script(script)
     text = ''.join(sentence['text_zh'] for sentence in sentences)
     profile = None
@@ -164,14 +176,19 @@ def run(script, out_dir, cfg, execute=False, model=None, voice=None, language_ty
     options = {'model': model or os.environ.get('BAILIAN_TTS_MODEL') or cfg.get('BAILIAN_TTS_MODEL') or 'qwen3-tts-flash',
                'voice': voice or os.environ.get('BAILIAN_TTS_VOICE') or cfg.get('BAILIAN_TTS_VOICE') or 'Cherry',
                'language_type': language_type or os.environ.get('BAILIAN_TTS_LANGUAGE') or cfg.get('BAILIAN_TTS_LANGUAGE') or 'Chinese'}
-    if not profile and not options['model'].startswith('qwen3-tts-flash'):
-        raise ValueError('Use --voice-record for cloned VC synthesis; otherwise this adapter supports Qwen3-TTS-Flash')
+    if not profile and not re.fullmatch(r'qwen3-tts-flash(?:-\d{4}-\d{2}-\d{2})?', options['model']):
+        raise ValueError('Use --voice-record for cloned VC synthesis; otherwise this adapter supports non-realtime Qwen3-TTS-Flash only')
     base = api_base(cfg) if cfg.get('DASHSCOPE_BASE_URL') else ''
     signature = fingerprint({'schema': 1, 'text': text, 'options': options, 'base': base, 'gap_s': gap_s})
     # Older CLI runs fingerprinted 0.0 while direct calls used 0. They are the same audio.
     legacy_signature = fingerprint({'schema': 1, 'text': text, 'options': options, 'base': base, 'gap_s': float(gap_s)})
+    signatures = [signature, legacy_signature]
+    if configured_base != base:
+        signatures.extend(fingerprint({'schema': 1, 'text': text, 'options': options,
+                                       'base': configured_base, 'gap_s': gap}) for gap in (gap_s, float(gap_s)))
     script_revision = 'script-' + fingerprint(sentences)[:20]
-    plan = {'signature': signature, **options, 'text_chars': len(text), 'sentences': len(sentences),
+    plan = {'signature': signature, **options, 'base_url': base, 'endpoint': ENDPOINT,
+            'text_chars': len(text), 'sentences': len(sentences),
             'chunks': len(chunks), 'chunk_chars': [len(chunk) for chunk in chunks], 'gap_s': gap_s,
             'out_dir': str(out_dir), 'key_configured': bool(cfg.get('DASHSCOPE_API_KEY', '').strip()), 'script_revision': script_revision}
     if profile:
@@ -187,15 +204,14 @@ def run(script, out_dir, cfg, execute=False, model=None, voice=None, language_ty
         save(out_dir / 'script-sentences.json', {'revision': script_revision, 'sentences': sentences})
         if manifest_path.is_file():
             manifest = load(manifest_path)
-            if manifest.get('signature') in (signature, legacy_signature) and final.is_file() and file_hash(final) == manifest.get('audio_sha256'):
+            if manifest.get('signature') in signatures and final.is_file() and file_hash(final) == manifest.get('audio_sha256'):
                 wav_frames(final)
                 manifest.update(plan)
                 save(manifest_path, manifest)
                 return {**manifest, 'reused': True}
         cache = out_dir / '.tts-cache' / signature
-        legacy_cache = out_dir / '.tts-cache' / legacy_signature
-        if not cache.exists() and legacy_cache.exists():
-            cache = legacy_cache
+        cache = next((out_dir / '.tts-cache' / sig for sig in signatures
+                      if (out_dir / '.tts-cache' / sig).exists()), cache)
         cache.mkdir(parents=True, exist_ok=True)
         details, parts = [], []
         for index, chunk in enumerate(chunks):

@@ -127,6 +127,8 @@ Codex 的用户级本地技能目录为 `~/.agents/skills`，支持目录链接�
 | `BAILIAN_TTS_VOICE` | `Cherry` |
 | `BAILIAN_TTS_LANGUAGE` | `Chinese` |
 
+普通配音只使用公共 `video_production.py tts`，默认仍是原来的 `qwen3-tts-flash / Cherry`，不依赖 `scratch` 适配器或 edge-tts。公共脚本会从现有北京/新加坡业务空间地址识别地域，在提交前选定该地域的官方通用 TTS 地址；不需要新增配置或手改 `.env`，不影响转写等其他服务。更新完整的 `video-production` 技能目录并保留本机 `.env` 后，刷新宿主技能即可；用 TTS dry-run 核对实际地址与模型/音色，详见 [公共配音配置与故障处理](skills/video-production/references/tts.md)。只有真实调用成功才表示该机器的 Key/权限与服务已验证。
+
 **如果用户需要声音克隆：** 仍共用上面的百炼 Key 和接口地址，不要求另配一把 Key。安装 AI 应告知用户需要一段本人或明确获授权的清楚单人录音（推荐10–20秒、无背景音乐），并确认对应克隆模型的权限／额度。不要在安装时自动上传录音或付费创建音色。普通配音的 `.env` 默认值保持不变：制作时用公共 `voice-create` 保存音色记录，再由 `tts --voice-record` 自动使用其绑定模型。创建音色与新文案合成分别计费；详细操作、查询与恢复见 [公共声音克隆说明](skills/video-production/references/voice-cloning.md)。
 
 真实 `.env` 只留在本机，不提交仓库，不在聊天、日志或安装回复中展示密钥。用户暂未填完时，主动保留“语音服务配置待完成”的状态和下一步填写指引；可以准备本地依赖，但不要把相关完整剪辑流程标成可用，也不要自行改成无声版交差。明确无声任务或已有可靠时码资料的例外，应说明可用范围和仍未配置的云功能。

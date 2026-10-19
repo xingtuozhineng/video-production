@@ -166,6 +166,84 @@ class TtsTests(unittest.TestCase):
         result = tts.run(self.script, self.out, cfg, voice='ExplicitVoice')
         self.assertEqual(result['voice'], 'ExplicitVoice')
 
+    def test_workspace_tts_uses_regional_speech_host_without_changing_other_services(self):
+        cfg = {**CFG, 'DASHSCOPE_BASE_URL': 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1'}
+        client = Client()
+        with patch.object(tts, 'Client', return_value=client) as factory, \
+                patch.object(tts, 'download_audio', side_effect=audio_fixture), \
+                patch.object(tts, 'normalize_audio', side_effect=lambda _, source, target: shutil.copyfile(source, target)):
+            result = tts.run(self.script, self.out, cfg, True, ffmpeg='offline')
+        self.assertEqual(factory.call_args.args[0]['DASHSCOPE_BASE_URL'], CFG['DASHSCOPE_BASE_URL'])
+        self.assertEqual(cfg['DASHSCOPE_BASE_URL'], 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1')
+        self.assertEqual(client.calls[0][:2], ('POST', '/services/aigc/multimodal-generation/generation'))
+        self.assertEqual((result['model'], result['voice']), ('qwen3-tts-flash', 'Cherry'))
+        self.assertEqual(result['base_url'], CFG['DASHSCOPE_BASE_URL'])
+        self.assertEqual(result['endpoint'], client.calls[0][1])
+        # Moving the same effective URL from the shared field to the TTS field is not new audio.
+        resumed = Client()
+        self.assertTrue(self.run_tts(resumed)['reused'])
+        self.assertEqual(resumed.calls, [])
+
+    def test_speech_host_selection_is_regional_and_validates_before_calling(self):
+        for base, expected in (
+            ('https://workspace.ap-southeast-1.maas.aliyuncs.com/api/v1', 'https://dashscope-intl.aliyuncs.com/api/v1'),
+            ('https://dashscope.aliyuncs.com/api/v1', 'https://dashscope.aliyuncs.com/api/v1'),
+            ('https://dashscope-intl.aliyuncs.com/api/v1', 'https://dashscope-intl.aliyuncs.com/api/v1'),
+        ):
+            with self.subTest(base=base):
+                result = tts.run(self.script, self.out, {**CFG, 'DASHSCOPE_BASE_URL': base})
+                self.assertEqual(result['base_url'], expected)
+        with patch.object(tts, 'Client') as factory:
+            with self.assertRaisesRegex(ValueError, 'official Bailian HTTPS'):
+                tts.run(self.script, self.out, {**CFG, 'DASHSCOPE_BASE_URL': 'http://untrusted.example/api/v1'},
+                        True, ffmpeg='offline')
+            factory.assert_not_called()
+        self.assertFalse(self.out.exists())
+
+    def test_other_protocols_are_rejected_instead_of_switching_model_or_voice(self):
+        for model in ('qwen-audio-3.1-tts-flash', 'qwen3-tts-flash-realtime'):
+            with self.subTest(model=model), self.assertRaisesRegex(ValueError, 'Qwen3-TTS-Flash'):
+                tts.run(self.script, self.out, CFG, model=model)
+        snapshot = tts.run(self.script, self.out, CFG, model='qwen3-tts-flash-2025-11-27')
+        self.assertEqual(snapshot['voice'], 'Cherry')
+        self.assertFalse(self.out.exists())
+
+    def test_workspace_cache_migration_reuses_paid_audio_and_saved_chunks(self):
+        from bailian_media import fingerprint, load, save
+        first = self.run_tts(Client())
+        workspace_base = 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1'
+        old_signature = fingerprint({'schema': 1, 'text': self.script.read_text('utf-8'),
+            'options': {key: first[key] for key in ('model', 'voice', 'language_type')},
+            'base': workspace_base, 'gap_s': 0})
+        cache = self.out / '.tts-cache'
+        (cache / first['signature']).rename(cache / old_signature)
+        manifest = load(self.out / 'tts-manifest.json')
+        manifest['signature'] = old_signature
+        save(self.out / 'tts-manifest.json', manifest)
+        cfg = {**CFG, 'DASHSCOPE_BASE_URL': workspace_base}
+        resumed = Client()
+        result = tts.run(self.script, self.out, cfg, True, ffmpeg='offline', client=resumed)
+        self.assertTrue(result['reused'])
+        (self.out / 'voiceover.wav').unlink()
+        result = tts.run(self.script, self.out, cfg, True, ffmpeg='offline', client=resumed)
+        self.assertEqual(tts.wav_frames(Path(result['audio'])), 2400)
+        self.assertEqual(resumed.calls, [])
+
+    def test_regional_host_change_does_not_bypass_unresolved_workspace_request(self):
+        from bailian_media import fingerprint, save
+        workspace_base = 'https://workspace.cn-beijing.maas.aliyuncs.com/api/v1'
+        cfg = {**CFG, 'DASHSCOPE_BASE_URL': workspace_base}
+        old_signature = fingerprint({'schema': 1, 'text': self.script.read_text('utf-8'),
+            'options': {'model': 'qwen3-tts-flash', 'voice': 'Cherry', 'language_type': 'Chinese'},
+            'base': workspace_base, 'gap_s': 0.0})
+        state_path = self.out / '.tts-cache' / old_signature / '0000.json'
+        for status in ('uncertain', 'submitting', 'rejected'):
+            save(state_path, {'status': status})
+            resumed = Client()
+            with self.subTest(status=status), self.assertRaisesRegex(RuntimeError, 'unresolved'):
+                tts.run(self.script, self.out, cfg, True, ffmpeg='offline', client=resumed)
+            self.assertEqual(resumed.calls, [])
+
     def test_corrupt_final_rebuilds_from_valid_cached_chunks(self):
         self.run_tts(Client())
         (self.out / 'voiceover.wav').write_bytes(b'corrupt')

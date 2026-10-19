@@ -35,7 +35,7 @@ python "<skill-root>/scripts/video_production.py" prepare --workspace-root "<wor
 
 环境门只解决运行环境；`.env` 的业务空间 Key 和地址仍需人工填写。
 
-需要新旁白时读取 [公共 TTS 执行器](references/tts.md)，使用 `video_production.py tts`；它接收本次文本／句子JSON，自动分句、分段合成、拼接和缓存恢复。默认配置已有可用音色时直接使用，不为每条视频写 TTS 脚本、查旧项目调用代码或重新询问全部参数。
+需要新旁白时读取 [公共 TTS 执行器](references/tts.md)，只使用 `video_production.py tts`；它接收本次文本／句子JSON，自动分句、分段合成、拼接和缓存恢复。普通配音默认保持 `qwen3-tts-flash / Cherry`，接口失败不自动换模型、换音色或另写兜底执行器；默认配置已有可用音色时直接使用，不为每条视频写 TTS 脚本、查旧项目调用代码或重新询问全部参数。
 
 用户明确要求声音克隆时读取 [公共声音克隆](references/voice-cloning.md)，使用 `voice-create → tts --voice-record`；已有音色直接复用记录。仅创建／查询音色不新建视频项目，记录保存到工作区的 `voice-library/`。其他子 Skill 共用这一入口，不各自实现上传、克隆或配音脚本。
 
